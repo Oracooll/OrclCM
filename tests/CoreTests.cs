@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -31,6 +32,7 @@ namespace OrclCM.Tests
 
         static int Main()
         {
+            L.Set(LanguageMode.English);
             Aggregation();
             Classification();
             StaleDisplay();
@@ -45,6 +47,10 @@ namespace OrclCM.Tests
             SettingsFile();
             AutostartEntry();
             Themes();
+            Sleep();
+            LogFiles();
+            PowerDraw();
+            Language();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " FAILED, " + passed + " passed.");
             return failures == 0 ? 0 : 1;
         }
@@ -221,25 +227,170 @@ namespace OrclCM.Tests
                   "duration formatting");
         }
 
+        static readonly DateTime T0 = new DateTime(2026, 10, 8, 9, 0, 0);
+
         static void Sessions()
         {
             var s = new Session();
-            s.Add(0, 30, true);
-            s.Add(2, 30, true);
-            s.Add(4, 60, true);
+            Check(s.Add(0, T0, 30, 50, true) == null, "first reading starts a session");
+            s.Add(2, T0.AddSeconds(2), 30, 50.5, true);
+            s.Add(4, T0.AddSeconds(4), 60, 51, true);
             Near(s.EnergyWh, (30 * 2 + 60 * 2) / 3600.0, "session energy integrated");
             Near(s.Peak, 60, "session peak");
             Near(s.Average, 40, "session average");
-            s.Add(100, 30, true);  // after a long gap (sleep): not integrated
+            s.Add(100, T0.AddSeconds(100), 30, 53, true);  // after a long gap (sleep): not integrated
             Near(s.EnergyWh, (30 * 2 + 60 * 2) / 3600.0, "gaps are not integrated");
-            s.Add(102, -10, false);  // unplugged: new session
+            var done = s.Add(102, T0.AddSeconds(102), -10, 53, false);  // unplugged: new session
+            Check(done != null && done.Kind == SessionRecord.PluggedKind && done.Start == T0 && done.End == T0.AddSeconds(100)
+                  && done.StartPercent == 50 && done.EndPercent == 53 && Math.Abs(done.PeakW.Value - 60) < 1e-9, "finished session is returned for the log");
             Check(s.Plugged == false && s.Samples == 1 && s.EnergyWh == 0 && s.Start == 102, "unplugging starts a new session");
-            s.Add(104, -10, false);
+            s.Add(104, T0.AddSeconds(104), -10, 53, false);
             Check(s.Text(164).StartsWith("On battery for 1 min · ") && s.Text(164).Contains(" -0.01 Wh") && s.Text(164).Contains("peak -10.0 W"),
                   "session text", s.Text(164));
-            s.Add(106, null, null);  // failed read: plug state unknown, keeps the session
+            s.Add(106, T0.AddSeconds(106), null, null, null);  // failed read: plug state unknown, keeps the session
             Check(s.Plugged == false && s.Samples == 2, "failed read keeps the session");
+            Check(s.Finish() == null, "sessions under a minute are not logged");
             Check(new Session().Text(0) == null, "no session text before data");
+            var quick = new Session();
+            quick.Add(0, T0, 5, 50, true);
+            Check(quick.Add(30, T0.AddSeconds(30), -5, 50, false) == null, "short session is not logged on plug change");
+        }
+
+        static Reading Wh(double pct, double wh, bool plugged = false) =>
+            new Reading { Percent = pct, RemainingWh = wh, FullWh = 50, Plugged = plugged, Watts = -5 };
+
+        static void Sleep()
+        {
+            var t = new SleepTracker();
+            Check(t.Observe(T0, Wh(80, 40)) == null, "no sleep on first reading");
+            Check(t.Observe(T0.AddSeconds(2), Wh(80, 40)) == null, "normal interval is not sleep");
+            Check(t.Observe(T0.AddSeconds(4), null) == null, "failed read is not sleep");
+            for (int i = 3; i < 100; i++) Check(t.Observe(T0.AddSeconds(i * 2), null) == null, "failed reads keep attempts going");
+            var after = T0.AddSeconds(200);
+            Check(t.Observe(after, Wh(80, 40)) == null, "long run of failed reads is not sleep");
+
+            var wake = after.AddHours(7).AddMinutes(40);
+            var s = t.Observe(wake, Wh(76, 37.9));
+            Check(s != null && s.Kind == SessionRecord.SleepKind && s.Start == after && s.End == wake, "gap of hours is sleep");
+            Near(s.EnergyWh, -2.1, "sleep energy");
+            Near(s.AverageW, -2.1 / (7 + 40 / 60.0), "sleep average power");
+            Check(SleepTracker.Text(s) == "7 h 40 min asleep: -4% (-2.1 Wh, avg -0.27 W)", "sleep text", SleepTracker.Text(s));
+            Check(t.Observe(wake.AddSeconds(2), Wh(76, 37.9)) == null, "back to normal after waking");
+
+            var u = new SleepTracker();
+            u.Observe(T0, new Reading { Percent = 60 });
+            var noEnergy = u.Observe(T0.AddMinutes(30), new Reading { Percent = 59 });
+            Check(noEnergy != null && noEnergy.EnergyWh == null && SleepTracker.Text(noEnergy) == "30 min asleep: -1%", "sleep without energy data", SleepTracker.Text(noEnergy));
+            Check(u.Observe(T0.AddMinutes(60), null) == null && u.Observe(T0.AddMinutes(60).AddSeconds(2), new Reading { Percent = 58 }) == null,
+                  "a failed read right after waking takes the report; no double report");
+        }
+
+        static void LogFiles()
+        {
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OrclCM-tests-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string sessions = System.IO.Path.Combine(dir, "sessions.csv"), health = System.IO.Path.Combine(dir, "health.csv");
+                Check(BatteryLog.LoadSessions(sessions).Count == 0 && BatteryLog.LoadHealth(health).Count == 0, "missing log files are empty");
+                var rec = new SessionRecord { Kind = SessionRecord.PluggedKind, Start = T0, End = T0.AddMinutes(52), StartPercent = 31, EndPercent = 80,
+                                              EnergyWh = 24.5, AverageW = 28.3, PeakW = 44.9 };
+                BatteryLog.AppendSession(sessions, rec);
+                BatteryLog.AppendSession(sessions, new SessionRecord { Kind = SessionRecord.SleepKind, Start = T0.AddHours(1), End = T0.AddHours(8), StartPercent = 80, EndPercent = 76 });
+                var lines = System.IO.File.ReadAllLines(sessions);
+                Check(lines[0] == BatteryLog.SessionsHeader && lines[1] == "2026-10-08 09:00:00,2026-10-08 09:52:00,plugged,31.0,80.0,24.500,28.30,44.90", "sessions.csv format", lines.Length > 1 ? lines[1] : "");
+                var back = BatteryLog.LoadSessions(sessions);
+                Check(back.Count == 2 && back[0].End == T0.AddMinutes(52) && back[0].PeakW == 44.9 && back[1].Kind == "sleep" && back[1].EnergyWh == null,
+                      "sessions round trip");
+
+                var r = new Reading { FullWh = 54.9, DesignWh = 56.3, Cycles = 32 };
+                Check(BatteryLog.RecordHealth(health, T0, r), "health recorded");
+                Check(!BatteryLog.RecordHealth(health, T0.AddHours(5), r), "one health row per day");
+                Check(BatteryLog.RecordHealth(health, T0.AddDays(1), new Reading { FullWh = 54.7, DesignWh = 56.3 }), "next day recorded");
+                Check(!BatteryLog.RecordHealth(health, T0.AddDays(2), new Reading { FullWh = 54.7 }), "no health row without design capacity");
+                var h = BatteryLog.LoadHealth(health);
+                Check(h.Count == 2 && h[0].Cycles == 32 && h[1].Cycles == null && Math.Abs(h[0].Percent - 54.9 / 56.3 * 100) < 1e-9, "health round trip");
+                System.IO.File.AppendAllText(sessions, "garbage line\r\n,,,\r\n");
+                Check(BatteryLog.LoadSessions(sessions).Count == 2, "bad log lines are skipped");
+            }
+            finally
+            {
+                if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+            }
+        }
+
+        static void PowerDraw()
+        {
+            var s = new Session();
+            for (int i = 0; i <= 200; i++) s.Add(i * 2, T0.AddSeconds(i * 2), -10, 60, false);  // 400 s at 10 W
+            var r = new Reading { Watts = -10, Plugged = false };
+            Check(Estimates.SystemDraw(r, -10, s, 400, out bool high) == "Laptop using 10.0 W" && !high, "laptop draw on battery");
+            Check(Estimates.SystemDraw(new Reading { Watts = -25, Plugged = false }, -25, s, 400, out high) == "Laptop using 25.0 W — higher than usual" && high,
+                  "draw well above the session average is flagged");
+            Check(Estimates.SystemDraw(new Reading { Watts = -12, Plugged = false }, -12, s, 400, out high) != null && !high, "slightly higher is not flagged");
+            var fresh = new Session();
+            fresh.Add(0, T0, -10, 60, false);
+            Check(Estimates.SystemDraw(new Reading { Watts = -30, Plugged = false }, -30, fresh, 60, out high) != null && !high, "no flag in the first 5 minutes");
+            Check(Estimates.SystemDraw(new Reading { Watts = -8, Plugged = true }, -8, s, 400, out high) == null, "no laptop draw while plugged in");
+            Check(Estimates.SystemDraw(new Reading { Watts = 20, Plugged = false }, 20, s, 400, out high) == null, "no laptop draw while charging");
+        }
+
+        static void Language()
+        {
+            // every L.T / L.F key used in the sources must have a Bulgarian translation
+            string src = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "src");
+            var missing = new List<string>();
+            int keys = 0;
+            foreach (var file in System.IO.Directory.GetFiles(src, "*.cs").Where(f => System.IO.Path.GetFileName(f) != "Lang.cs"))
+            {
+                string code = System.IO.File.ReadAllText(file);
+                foreach (Match m in Regex.Matches(code, @"\bL\.(T|F)\("))
+                {
+                    string arg = FirstArgument(code, m.Index + m.Length, m.Groups[1].Value == "F");
+                    foreach (Match lit in Regex.Matches(arg, "\"((?:[^\"\\\\]|\\\\.)*)\""))
+                    {
+                        string key = lit.Groups[1].Value.Replace("\\n", "\n").Replace("\\\"", "\"");
+                        keys++;
+                        if (!L.Bg.ContainsKey(key)) missing.Add(System.IO.Path.GetFileName(file) + ": " + key);
+                    }
+                }
+            }
+            Check(keys > 80, "translation keys found in sources", keys);
+            Check(missing.Count == 0, "every UI string has a Bulgarian translation", string.Join(" | ", missing));
+            foreach (var kv in L.Bg)
+                Check(Regex.Matches(kv.Key, @"\{\d\}").Count == Regex.Matches(kv.Value, @"\{\d\}").Count, "placeholders match: " + kv.Key);
+
+            L.Bulgarian = true;
+            try
+            {
+                Check(Label(R(12)) == "Зарежда се" && Label(R(-8)) == "Включено · разрежда се", "Bulgarian state labels");
+                Check(Estimates.Duration(3 * 3600 + 12 * 60) == "3 ч 12 мин", "Bulgarian duration");
+                Check(Present.Describe(new Snapshot(1, 1, R(5), null), new Snapshot(1, 1, R(5), null), 1).Detail == "Батерия 50%", "Bulgarian detail");
+                Check(L.T("not a key") == "not a key", "unknown text falls back to English");
+            }
+            finally { L.Bulgarian = false; }
+        }
+
+        static string FirstArgument(string code, int start, bool firstOnly)
+        {
+            int depth = 0;
+            var sb = new System.Text.StringBuilder();
+            for (int i = start; i < code.Length; i++)
+            {
+                char c = code[i];
+                if (c == '"')
+                {
+                    int j = i + 1;
+                    while (j < code.Length && code[j] != '"') j += code[j] == '\\' ? 2 : 1;
+                    sb.Append(code, i, j - i + 1);
+                    i = j;
+                    continue;
+                }
+                if (c == '(') depth++;
+                if (c == ')') { if (depth == 0) break; depth--; }
+                if (c == ',' && depth == 0 && firstOnly) break;
+                sb.Append(c);
+            }
+            return sb.ToString();
         }
 
         static void AlertRules()

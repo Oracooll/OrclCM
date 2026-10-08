@@ -64,42 +64,204 @@ namespace OrclCM
             string.IsNullOrEmpty(v) ? "" : v.IndexOfAny(new[] { ',', '"', '\n' }) >= 0 ? "\"" + v.Replace("\"", "\"\"") + "\"" : v;
     }
 
+    /// <summary>One finished period for the battery log: plugged in, on battery, or asleep.</summary>
+    sealed class SessionRecord
+    {
+        public const string PluggedKind = "plugged", BatteryKind = "battery", SleepKind = "sleep";
+        public DateTime Start, End;
+        public string Kind;
+        public double? StartPercent, EndPercent, EnergyWh, AverageW, PeakW;
+
+        public double Seconds => (End - Start).TotalSeconds;
+    }
+
     /// <summary>Statistics since the charger was last plugged in or unplugged.</summary>
     sealed class Session
     {
-        const double MaxGap = 10;  // longer gaps (sleep, failed reads) are not integrated
+        const double MaxGap = 10;         // longer gaps (sleep, failed reads) are not integrated
+        public const double MinLogged = 60;  // shorter sessions are not written to the log
         public bool? Plugged { get; private set; }
         public double Start { get; private set; }
         public double EnergyWh { get; private set; }  // signed: + into the battery, - out of it
         public double Peak { get; private set; }      // largest |W| seen, with its sign
-        double sum, last = -1;
+        double sum, last = -1, lastTime;
+        DateTime startAt, lastAt;
+        double? startPercent, lastPercent;
         int count;
 
         public int Samples => count;
         public double? Average => count > 0 ? sum / count : (double?)null;
 
-        public void Add(double time, double? watts, bool? plugged)
+        /// <summary>Adds a successful reading; returns the session that just ended (plug state
+        /// changed) if it is long enough to log, otherwise null.</summary>
+        public SessionRecord Add(double time, DateTime at, double? watts, double? percent, bool? plugged)
         {
+            SessionRecord finished = null;
             if (plugged.HasValue && plugged != Plugged)
             {
-                Plugged = plugged; Start = time; EnergyWh = 0; Peak = 0; sum = 0; count = 0; last = -1;
+                finished = Finish();
+                Plugged = plugged; Start = time; startAt = at; startPercent = percent;
+                EnergyWh = 0; Peak = 0; sum = 0; count = 0; last = -1;
             }
-            if (!watts.HasValue) { last = -1; return; }
+            lastTime = time; lastAt = at;
+            if (percent.HasValue) lastPercent = percent;
+            if (!startPercent.HasValue) startPercent = percent;
+            if (!watts.HasValue) { last = -1; return finished; }
             double w = watts.Value;
             if (last >= 0 && time - last <= MaxGap) EnergyWh += w * (time - last) / 3600;
             last = time;
             sum += w;
             count++;
             if (Math.Abs(w) > Math.Abs(Peak)) Peak = w;
+            return finished;
+        }
+
+        /// <summary>The current session as a log record (when the app exits), or null if too short.</summary>
+        public SessionRecord Finish()
+        {
+            if (!Plugged.HasValue || count == 0 || lastTime - Start < MinLogged) return null;
+            return new SessionRecord
+            {
+                Kind = Plugged.Value ? SessionRecord.PluggedKind : SessionRecord.BatteryKind,
+                Start = startAt, End = lastAt, StartPercent = startPercent, EndPercent = lastPercent,
+                EnergyWh = EnergyWh, AverageW = Average, PeakW = Peak,
+            };
         }
 
         public string Text(double now)
         {
             if (!Plugged.HasValue || count == 0) return null;
             var inv = CultureInfo.InvariantCulture;
-            return (Plugged.Value ? "Plugged in for " : "On battery for ") + Estimates.Duration(now - Start) + " · "
-                 + EnergyWh.ToString(Math.Abs(EnergyWh) < 1 ? "+0.00;-0.00;0.00" : "+0.0;-0.0;0.0", inv) + " Wh · avg " + Average.Value.ToString("+0.0;-0.0;0.0", inv)
-                 + " W · peak " + Peak.ToString("+0.0;-0.0;0.0", inv) + " W";
+            return L.F(Plugged.Value ? "Plugged in for {0} · {1} Wh · avg {2} W · peak {3} W" : "On battery for {0} · {1} Wh · avg {2} W · peak {3} W",
+                       Estimates.Duration(now - Start), EnergyWh.ToString(Math.Abs(EnergyWh) < 1 ? "+0.00;-0.00;0.00" : "+0.0;-0.0;0.0", inv),
+                       Average.Value.ToString("+0.0;-0.0;0.0", inv), Peak.ToString("+0.0;-0.0;0.0", inv));
+        }
+    }
+
+    /// <summary>Spots sleep (and hibernation): Windows freezes desktop apps while asleep, so a
+    /// long gap between read attempts means the PC was asleep. Failed reads don't count as gaps.</summary>
+    sealed class SleepTracker
+    {
+        public const double MinGapSeconds = 120;
+        DateTime? lastAttempt, lastGoodAt;
+        Reading lastGood;
+
+        public SessionRecord Observe(DateTime at, Reading reading)
+        {
+            SessionRecord sleep = null;
+            if (reading != null && lastAttempt.HasValue && lastGood != null && (at - lastAttempt.Value).TotalSeconds >= MinGapSeconds)
+            {
+                double? wh = reading.RemainingWh.HasValue && lastGood.RemainingWh.HasValue ? reading.RemainingWh - lastGood.RemainingWh : null;
+                double hours = (at - lastGoodAt.Value).TotalHours;
+                sleep = new SessionRecord
+                {
+                    Kind = SessionRecord.SleepKind, Start = lastGoodAt.Value, End = at,
+                    StartPercent = lastGood.Percent, EndPercent = reading.Percent,
+                    EnergyWh = wh, AverageW = wh.HasValue && hours > 0 ? wh / hours : null,
+                };
+            }
+            lastAttempt = at;
+            if (reading != null) { lastGood = reading; lastGoodAt = at; }
+            return sleep;
+        }
+
+        public static string Text(SessionRecord s)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            string pct = s.StartPercent.HasValue && s.EndPercent.HasValue
+                ? (s.EndPercent.Value - s.StartPercent.Value).ToString("+0;-0;0", inv) : "?";
+            if (!s.EnergyWh.HasValue)
+                return L.F("{0} asleep: {1}%", Estimates.Duration(s.Seconds), pct);
+            return L.F("{0} asleep: {1}% ({2} Wh, avg {3} W)", Estimates.Duration(s.Seconds), pct,
+                       s.EnergyWh.Value.ToString("+0.0;-0.0;0.0", inv), (s.AverageW ?? 0).ToString("+0.00;-0.00;0.00", inv));
+        }
+    }
+
+    /// <summary>Battery log files in %APPDATA%\OrclCM: sessions.csv and health.csv.</summary>
+    static class BatteryLog
+    {
+        static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+        const string TimeFormat = "yyyy-MM-dd HH:mm:ss";
+        public const string SessionsHeader = "start,end,kind,start_percent,end_percent,energy_wh,avg_w,peak_w";
+        public const string HealthHeader = "date,full_wh,design_wh,cycles";
+
+        public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppInfo.Name);
+        public static string SessionsPath => Path.Combine(Folder, "sessions.csv");
+        public static string HealthPath => Path.Combine(Folder, "health.csv");
+
+        static string N(double? v, string format) => v.HasValue ? v.Value.ToString(format, Inv) : "";
+        static double? P(string s) => double.TryParse(s, NumberStyles.Float, Inv, out double v) ? v : (double?)null;
+
+        public static string Line(SessionRecord r) =>
+            string.Join(",", r.Start.ToString(TimeFormat, Inv), r.End.ToString(TimeFormat, Inv), r.Kind,
+                        N(r.StartPercent, "0.0"), N(r.EndPercent, "0.0"), N(r.EnergyWh, "0.000"), N(r.AverageW, "0.00"), N(r.PeakW, "0.00"));
+
+        public static void AppendSession(string path, SessionRecord r) => Append(path, SessionsHeader, Line(r));
+
+        public static List<SessionRecord> LoadSessions(string path)
+        {
+            var list = new List<SessionRecord>();
+            foreach (var cols in Rows(path))
+            {
+                if (cols.Length < 8 || !DateTime.TryParseExact(cols[0], TimeFormat, Inv, DateTimeStyles.None, out DateTime start)
+                    || !DateTime.TryParseExact(cols[1], TimeFormat, Inv, DateTimeStyles.None, out DateTime end)) continue;
+                list.Add(new SessionRecord { Start = start, End = end, Kind = cols[2], StartPercent = P(cols[3]), EndPercent = P(cols[4]),
+                                             EnergyWh = P(cols[5]), AverageW = P(cols[6]), PeakW = P(cols[7]) });
+            }
+            return list;
+        }
+
+        public sealed class HealthEntry
+        {
+            public DateTime Date;
+            public double FullWh, DesignWh;
+            public int? Cycles;
+            public double Percent => DesignWh > 0 ? 100 * FullWh / DesignWh : 0;
+        }
+
+        /// <summary>Writes one health row per day; returns true if a row was added.</summary>
+        public static bool RecordHealth(string path, DateTime today, Reading r)
+        {
+            if (!r.FullWh.HasValue || !r.DesignWh.HasValue || r.DesignWh <= 0) return false;
+            var existing = LoadHealth(path);
+            if (existing.Count > 0 && existing[existing.Count - 1].Date >= today.Date) return false;
+            Append(path, HealthHeader, string.Join(",", today.ToString("yyyy-MM-dd", Inv), N(r.FullWh, "0.000"), N(r.DesignWh, "0.000"),
+                                                   r.Cycles.HasValue ? r.Cycles.Value.ToString(Inv) : ""));
+            return true;
+        }
+
+        public static List<HealthEntry> LoadHealth(string path)
+        {
+            var list = new List<HealthEntry>();
+            foreach (var cols in Rows(path))
+            {
+                if (cols.Length < 4 || !DateTime.TryParseExact(cols[0], "yyyy-MM-dd", Inv, DateTimeStyles.None, out DateTime d)) continue;
+                double? full = P(cols[1]), design = P(cols[2]);
+                if (!full.HasValue || !design.HasValue) continue;
+                list.Add(new HealthEntry { Date = d, FullWh = full.Value, DesignWh = design.Value,
+                                           Cycles = int.TryParse(cols[3], NumberStyles.Integer, Inv, out int c) ? c : (int?)null });
+            }
+            return list;
+        }
+
+        static IEnumerable<string[]> Rows(string path)
+        {
+            string[] lines;
+            try { lines = File.Exists(path) ? File.ReadAllLines(path) : new string[0]; }
+            catch (Exception) { yield break; }
+            for (int i = 1; i < lines.Length; i++)  // skip the header
+                if (lines[i].Length > 0) yield return lines[i].Split(',');
+        }
+
+        static void Append(string path, string header, string line)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                if (!File.Exists(path)) File.WriteAllText(path, header + "\r\n");
+                File.AppendAllText(path, line + "\r\n");
+            }
+            catch (Exception) { }  // logging must never break the meter
         }
     }
 
@@ -109,9 +271,9 @@ namespace OrclCM
 
         public static string Duration(double seconds)
         {
-            if (seconds < 60) return "<1 min";
+            if (seconds < 60) return L.T("<1 min");
             int minutes = (int)Math.Round(seconds / 60);
-            return minutes < 60 ? minutes + " min" : minutes / 60 + " h " + (minutes % 60).ToString("00") + " min";
+            return minutes < 60 ? L.F("{0} min", minutes) : L.F("{0} h {1} min", minutes / 60, (minutes % 60).ToString("00"));
         }
 
         /// <summary>"Full in 47 min" / "Empty in 3 h 12 min", from the recent average wattage.</summary>
@@ -126,25 +288,41 @@ namespace OrclCM
             {
                 if (r.Percent >= 99.5) return null;
                 hours = (r.FullWh.Value - r.RemainingWh.Value) / w;
-                prefix = "Full in ";
+                prefix = "Full in {0}";
             }
             else if (w < -Battery.IdleWatts)
             {
                 hours = r.RemainingWh.Value / -w;
-                prefix = "Empty in ";
+                prefix = "Empty in {0}";
             }
             else return null;
             if (hours <= 0 || hours > 48) return null;
-            return prefix + Duration(hours * 3600);
+            return L.F(prefix, Duration(hours * 3600));
+        }
+
+        /// <summary>On battery the drain is the whole laptop's power use. Flags it when the recent
+        /// average is well above this session's average.</summary>
+        public static string SystemDraw(Reading r, double? recentAverage, Session session, double now, out bool high)
+        {
+            high = false;
+            if (r.Plugged != false || !r.Watts.HasValue || r.Watts.Value >= -Battery.IdleWatts) return null;
+            double draw = -(recentAverage ?? r.Watts.Value);
+            if (draw <= 0) draw = -r.Watts.Value;
+            if (session.Plugged == false && session.Average.HasValue && now - session.Start >= 300)
+            {
+                double usual = -session.Average.Value;
+                high = usual > 0 && draw >= Math.Max(usual * 1.5, usual + 3);
+            }
+            return L.F(high ? "Laptop using {0} W — higher than usual" : "Laptop using {0} W", draw.ToString("0.0", Inv));
         }
 
         public static string Health(Reading r)
         {
             var parts = new List<string>();
             if (r.FullWh.HasValue && r.DesignWh.HasValue && r.DesignWh > 0)
-                parts.Add("Health " + (100 * r.FullWh.Value / r.DesignWh.Value).ToString("0", Inv) + "%  ("
-                          + r.FullWh.Value.ToString("0.0", Inv) + " of " + r.DesignWh.Value.ToString("0.0", Inv) + " Wh)");
-            if (r.Cycles.HasValue) parts.Add(r.Cycles.Value + " cycles");
+                parts.Add(L.F("Health {0}%  ({1} of {2} Wh)", (100 * r.FullWh.Value / r.DesignWh.Value).ToString("0", Inv),
+                              r.FullWh.Value.ToString("0.0", Inv), r.DesignWh.Value.ToString("0.0", Inv)));
+            if (r.Cycles.HasValue) parts.Add(L.F("{0} cycles", r.Cycles.Value));
             return parts.Count > 0 ? string.Join("  ·  ", parts) : null;
         }
     }
@@ -161,6 +339,10 @@ namespace OrclCM
         public bool AlertDraining = true;
         public int GraphRange = 240;  // seconds
         public ThemeMode Theme = ThemeMode.System;
+        public LanguageMode Language = LanguageMode.System;
+        public bool AlertSleep = true;
+        public bool MiniMode;
+        public int? MiniX, MiniY;
 
         public static readonly int[] GraphRanges = { 240, 3600, 86400 };
 
@@ -207,6 +389,11 @@ namespace OrclCM
                     case "AlertDraining": s.AlertDraining = flag; break;
                     case "GraphRange": if (isInt && Array.IndexOf(GraphRanges, n) >= 0) s.GraphRange = n; break;
                     case "Theme": if (!isInt && Enum.TryParse(value, true, out ThemeMode t)) s.Theme = t; break;
+                    case "Language": if (!isInt && Enum.TryParse(value, true, out LanguageMode lang)) s.Language = lang; break;
+                    case "AlertSleep": s.AlertSleep = flag; break;
+                    case "MiniMode": s.MiniMode = flag; break;
+                    case "MiniX": if (isInt) s.MiniX = n; break;
+                    case "MiniY": if (isInt) s.MiniY = n; break;
                 }
             }
             return s;
@@ -228,6 +415,11 @@ namespace OrclCM
             Put("AlertDraining", AlertDraining ? 1 : 0);
             Put("GraphRange", GraphRange);
             Put("Theme", Theme);
+            Put("Language", Language);
+            Put("AlertSleep", AlertSleep ? 1 : 0);
+            Put("MiniMode", MiniMode ? 1 : 0);
+            if (MiniX.HasValue) Put("MiniX", MiniX.Value);
+            if (MiniY.HasValue) Put("MiniY", MiniY.Value);
             return sb.ToString();
         }
 
@@ -260,13 +452,13 @@ namespace OrclCM
                 if (s.AlertHighEnabled && !highFired && r.Plugged == true && p >= s.AlertHigh)
                 {
                     highFired = true;
-                    result.Add(new Alert("Battery at " + p.ToString("0", inv) + "%", "Charged to your " + s.AlertHigh + "% limit - you can unplug the charger."));
+                    result.Add(new Alert(L.F("Battery at {0}%", p.ToString("0", inv)), L.F("Charged to your {0}% limit - you can unplug the charger.", s.AlertHigh)));
                 }
                 if (lowFired && (p > s.AlertLow + Hysteresis || r.Plugged == true)) lowFired = false;
                 if (s.AlertLowEnabled && !lowFired && r.Plugged == false && p <= s.AlertLow)
                 {
                     lowFired = true;
-                    result.Add(new Alert("Battery at " + p.ToString("0", inv) + "%", "Battery is low - plug in the charger."));
+                    result.Add(new Alert(L.F("Battery at {0}%", p.ToString("0", inv)), L.T("Battery is low - plug in the charger.")));
                 }
             }
 
@@ -278,8 +470,8 @@ namespace OrclCM
                 if (s.AlertDraining && !drainFired && now - drainSince >= DrainSeconds)
                 {
                     drainFired = true;
-                    result.Add(new Alert("Plugged in but draining",
-                        "The battery is losing " + (-r.Watts.Value).ToString("0.0", inv) + " W although the charger is connected - it may be too weak, or charging may be paused."));
+                    result.Add(new Alert(L.T("Plugged in but draining"),
+                        L.F("The battery is losing {0} W although the charger is connected - it may be too weak, or charging may be paused.", (-r.Watts.Value).ToString("0.0", inv))));
                 }
             }
             return result;

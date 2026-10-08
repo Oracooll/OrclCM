@@ -22,7 +22,7 @@ if not exist build mkdir build
 if not exist dist mkdir dist
 
 echo [1/3] Building and running tests
-"%CSC%" %OPTS% /target:exe /out:build\CoreTests.exe src\AppInfo.cs src\Core.cs src\Features.cs src\TrayIconRenderer.cs tests\CoreTests.cs
+"%CSC%" %OPTS% /target:exe /out:build\CoreTests.exe src\AppInfo.cs src\Lang.cs src\Core.cs src\Features.cs src\TrayIconRenderer.cs tests\CoreTests.cs
 if errorlevel 1 goto :fail
 build\CoreTests.exe
 if errorlevel 1 goto :fail

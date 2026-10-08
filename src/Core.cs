@@ -54,7 +54,7 @@ namespace OrclCM
         {
             var batteries = records.Where(r => (r.Capabilities & ShortTerm) == 0).ToList();
             if (batteries.Count == 0)
-                throw new BatteryException("No battery found");
+                throw new BatteryException(L.T("No battery found"));
 
             double? watts = 0;
             var flows = new List<Flow>();
@@ -88,8 +88,8 @@ namespace OrclCM
             bool energyKnown = absolute && percentKnown && full > 0;
 
             var extra = new List<string>();
-            if (batteries.Count > 1) extra.Add(batteries.Count + " batteries");
-            if (relativeUnits.Contains(true)) extra.Add("Rate reported in relative units");
+            if (batteries.Count > 1) extra.Add(L.F("{0} batteries", batteries.Count));
+            if (relativeUnits.Contains(true)) extra.Add(L.T("Rate reported in relative units"));
             return new Reading
             {
                 Watts = watts,
@@ -275,21 +275,21 @@ namespace OrclCM
             switch (flow)
             {
                 case Flow.Charging:
-                    color = Tone.Charging; label = "Charging"; break;
+                    color = Tone.Charging; label = L.T("Charging"); break;
                 case Flow.Discharging:
                     color = Tone.Discharging;
-                    label = r.Plugged == true ? "Plugged in · discharging" : r.Plugged == false ? "On battery" : "Discharging";
+                    label = L.T(r.Plugged == true ? "Plugged in · discharging" : r.Plugged == false ? "On battery" : "Discharging");
                     break;
                 case Flow.Idle:
-                    if (r.Plugged == false) { color = Tone.Discharging; label = "On battery"; }
-                    else { color = Tone.Idle; label = r.Plugged == true ? "Plugged in · not charging" : "Idle"; }
+                    if (r.Plugged == false) { color = Tone.Discharging; label = L.T("On battery"); }
+                    else { color = Tone.Idle; label = L.T(r.Plugged == true ? "Plugged in · not charging" : "Idle"); }
                     break;
                 default:
-                    if (r.Plugged == false) { color = Tone.Discharging; label = "On battery"; }
-                    else { color = Tone.Idle; label = r.Plugged == true ? "Plugged in" : "Status unknown"; }
+                    if (r.Plugged == false) { color = Tone.Discharging; label = L.T("On battery"); }
+                    else { color = Tone.Idle; label = L.T(r.Plugged == true ? "Plugged in" : "Status unknown"); }
                     break;
             }
-            if (!r.Watts.HasValue) label += " · rate unavailable";
+            if (!r.Watts.HasValue) label += L.T(" · rate unavailable");
         }
 
         public static string FormatWatts(double? w)
@@ -299,17 +299,17 @@ namespace OrclCM
         }
 
         static string Ago(double seconds) =>
-            seconds < 120 ? seconds.ToString("0", Inv) + " s" : (seconds / 60).ToString("0", Inv) + " min";
+            seconds < 120 ? L.F("{0} s", seconds.ToString("0", Inv)) : L.F("{0} min", (seconds / 60).ToString("0", Inv));
 
         public static View Describe(Snapshot attempt, Snapshot good, double now, string timeLeft = null)
         {
             const string App = AppInfo.Name;
             if (attempt == null)
-                return new View { Big = "--", BigTone = Tone.Fg, Status = "Reading battery…", StatusTone = Tone.Dim, Detail = "",
-                                  TrayTone = Tone.Dim, Tooltip = App + ": reading battery…" };
+                return new View { Big = "--", BigTone = Tone.Fg, Status = L.T("Reading battery…"), StatusTone = Tone.Dim, Detail = "",
+                                  TrayTone = Tone.Dim, Tooltip = App + ": " + L.T("Reading battery…") };
             if (good == null)
             {
-                string msg = attempt.Error ?? "No battery data";
+                string msg = attempt.Error ?? L.T("No battery data");
                 return new View { Big = "--", BigTone = Tone.Fg, Status = msg, StatusTone = Tone.Dim, Detail = "",
                                   TrayTone = Tone.Dim, Tooltip = App + ": " + msg };
             }
@@ -317,15 +317,15 @@ namespace OrclCM
             var r = good.Reading;
             Classify(r, out Tone color, out string label);
             var parts = new List<string>();
-            if (r.Percent.HasValue) parts.Add("Battery " + r.Percent.Value.ToString("0", Inv) + "%");
+            if (r.Percent.HasValue) parts.Add(L.F("Battery {0}%", r.Percent.Value.ToString("0", Inv)));
             if (timeLeft != null) parts.Add(timeLeft);
             if (r.Extra.Length > 0) parts.Add(r.Extra);
 
             double age = now - good.Time;
             if (attempt.Error != null || age > StaleAfter)
             {
-                string why = attempt.Error ?? "Waiting for a new reading";
-                string status = "Stale · last reading " + Ago(age) + " ago";
+                string why = attempt.Error ?? L.T("Waiting for a new reading");
+                string status = L.F("Stale · last reading {0} ago", Ago(age));
                 return new View { Big = FormatWatts(r.Watts), BigTone = Tone.Stale, Status = status, StatusTone = Tone.Dim,
                                   Detail = why, TrayTone = Tone.Dim, Tooltip = App + ": " + status + " (" + why + ")" };
             }

@@ -2,15 +2,20 @@
 
 A tiny native Windows tray app that shows, live, how many **watts your laptop battery is charging (or draining) at**, with a rolling history graph.
 
-- **~80 KB portable exe**, nothing to install — runs on the .NET Framework 4.8 built into Windows 10 and 11
+- **~120 KB portable exe**, nothing to install — runs on the .NET Framework 4.8 built into Windows 10 and 11
+- **English and Bulgarian** (Български) — follows Windows, or choose in the Language menu
 - **Tray-only:** no taskbar button. The tray icon shows the live wattage in small digits. Click it to show / hide the window, hover for details. Closing or minimizing the window hides it to the tray; quit with **Exit**
-- **Menu** on the window's title-bar icon (and on right-click of the tray icon or the window): the usual window commands plus *Always on top, Start with Windows, Theme (System / Dark / Light), Graph range, Settings…, Export history…, Help, About, Exit*
+- **Menu** on the window's title-bar icon (and on right-click of the tray icon or the window): the usual window commands plus *Always on top, Start with Windows, Mini widget, Theme (System / Dark / Light), Language, Graph range, Battery log…, Settings…, Export history…, Help, About, Exit*
 - **Start with Windows** — starts straight into the tray; follows the exe if you move it
 - **Time left:** "Full in 47 min" / "Empty in 3 h 12 min" from the last minute's average
 - **Battery health:** capacity now vs. when new, and charge cycle count (when the battery reports them)
 - **Session stats** since plugging in / unplugging: energy in or out (Wh), average and peak rate
 - **Alerts** (Settings): charged to a limit (e.g. 80%), low battery, and "plugged in but draining" for a minute
-- **History** up to 24 hours — graph range 4 min / 1 h / 24 h, export to CSV
+- **Laptop power draw** on battery ("Laptop using 14.2 W"), highlighted when well above the session's average
+- **Sleep report:** after waking, how much battery was used while asleep (spots laptops that keep waking up)
+- **History** up to 24 hours — graph range 4 min / 1 h / 24 h, point at the graph for exact values, export to CSV
+- **Battery log:** every plugged-in / on-battery / sleep period and a daily battery-health record, kept across restarts (`sessions.csv`, `health.csv` in `%APPDATA%\OrclCM`), with a health-over-time chart
+- **Mini widget:** a small always-on-top box with just the wattage — drag anywhere, double-click for the full window
 - **Dark and light themes**, following Windows by default
 - Window position, size and settings are remembered (`%APPDATA%\OrclCM\settings.ini`)
 - Starting OrclCM again while it's running just brings up its window
@@ -45,7 +50,9 @@ The version lives in `src\AppInfo.cs` (`Version`, format `1.X.XXX`, plus the mat
 | `src\Features.cs` | history, session stats, estimates, health, alerts, settings, autostart |
 | `src\NativeBattery.cs` | Windows battery driver access |
 | `src\MainForm.cs` | window, graph, menus and tray icon |
-| `src\SettingsForm.cs`, `src\InfoForms.cs` | Settings, About and Help dialogs |
+| `src\SettingsForm.cs`, `src\InfoForms.cs`, `src\LogForm.cs` | Settings, About, Help and Battery log windows |
+| `src\MiniForm.cs` | mini widget |
+| `src\Lang.cs` | English / Bulgarian texts (a test checks every UI string is translated) |
 | `src\TrayIconRenderer.cs` | draws the wattage digits on the tray icon |
 | `tests\CoreTests.cs` | regression tests (run by `build.bat`) |
 
