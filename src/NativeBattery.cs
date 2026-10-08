@@ -82,6 +82,7 @@ namespace OrclCM
         public static List<BatteryRecord> ReadAll()
         {
             var result = new List<BatteryRecord>();
+            Exception firstError = null;
             var guid = BatteryClass;
             IntPtr set = SetupDiGetClassDevs(ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
             if (set == new IntPtr(-1))
@@ -97,6 +98,7 @@ namespace OrclCM
                         throw new Win32Exception();
                     }
                     SetupDiGetDeviceInterfaceDetail(set, ref did, IntPtr.Zero, 0, out int size, IntPtr.Zero);
+                    if (size <= 8) continue;  // no usable device path
                     IntPtr detail = Marshal.AllocHGlobal(size);
                     try
                     {
@@ -104,8 +106,12 @@ namespace OrclCM
                         Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);
                         if (!SetupDiGetDeviceInterfaceDetail(set, ref did, detail, size, out size, IntPtr.Zero))
                             throw new Win32Exception();
-                        var record = ReadOne(Marshal.PtrToStringUni(IntPtr.Add(detail, 4)));
-                        if (record != null) result.Add(record);
+                        try
+                        {
+                            var record = ReadOne(Marshal.PtrToStringUni(IntPtr.Add(detail, 4)));
+                            if (record != null) result.Add(record);
+                        }
+                        catch (Win32Exception e) { firstError = firstError ?? e; }  // one bad device (e.g. a UPS) must not hide the others
                     }
                     finally
                     {
@@ -117,6 +123,7 @@ namespace OrclCM
             {
                 SetupDiDestroyDeviceInfoList(set);
             }
+            if (result.Count == 0 && firstError != null) throw firstError;
             return result;
         }
 

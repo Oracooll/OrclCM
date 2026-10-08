@@ -6,7 +6,7 @@ namespace OrclCM
 {
     sealed class SettingsForm : Form
     {
-        readonly CheckBox autostart, high, low, drain, sleep;
+        readonly CheckBox autostart, high, low, drain, sleep, updates;
         readonly NumericUpDown highValue, lowValue;
         readonly ComboBox theme, language;
 
@@ -34,9 +34,11 @@ namespace OrclCM
             lowValue = Percent(s.AlertLow, 5, 50);
             drain = new CheckBox { Text = L.T("Alert when plugged in but the battery is draining"), Checked = s.AlertDraining, AutoSize = true };
             sleep = new CheckBox { Text = L.T("Report battery use during sleep"), Checked = s.AlertSleep, AutoSize = true };
+            updates = new CheckBox { Text = L.T("Check for updates automatically"), Checked = s.AutoUpdateCheck, AutoSize = true };
 
             int row = 0;
             grid.Controls.Add(autostart, 0, row); grid.SetColumnSpan(autostart, 2); row++;
+            grid.Controls.Add(updates, 0, row); grid.SetColumnSpan(updates, 2); row++;
             grid.Controls.Add(Caption(L.T("Theme")), 0, row); grid.Controls.Add(theme, 1, row); row++;
             grid.Controls.Add(Caption(L.T("Language")), 0, row); grid.Controls.Add(language, 1, row); row++;
             grid.Controls.Add(Heading(L.T("Notifications")), 0, row); row++;
@@ -86,6 +88,7 @@ namespace OrclCM
             s.AlertLow = (int)lowValue.Value;
             s.AlertDraining = drain.Checked;
             s.AlertSleep = sleep.Checked;
+            s.AutoUpdateCheck = updates.Checked;
             s.Theme = (ThemeMode)theme.SelectedIndex;
             s.Language = (LanguageMode)language.SelectedIndex;
         }

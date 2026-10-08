@@ -32,6 +32,16 @@ namespace OrclCM.Tests
 
         static int Main()
         {
+            try { return Run(); }
+            catch (Exception e)  // a crashing test must fail the build, not exit with a negative code
+            {
+                Console.WriteLine("CRASH: " + e);
+                return 1;
+            }
+        }
+
+        static int Run()
+        {
             L.Set(LanguageMode.English);
             Aggregation();
             Classification();
@@ -51,6 +61,9 @@ namespace OrclCM.Tests
             LogFiles();
             PowerDraw();
             Language();
+            SessionBreaks();
+            LogQueueAndCheckpoint();
+            Updates();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " FAILED, " + passed + " passed.");
             return failures == 0 ? 0 : 1;
         }
@@ -261,28 +274,42 @@ namespace OrclCM.Tests
 
         static void Sleep()
         {
+            var T0 = DateTime.SpecifyKind(CoreTests.T0, DateTimeKind.Utc);  // the tracker works in UTC
+            double Up(DateTime at) => (at - T0).TotalSeconds;  // uptime advances with real time in these tests
             var t = new SleepTracker();
-            Check(t.Observe(T0, Wh(80, 40)) == null, "no sleep on first reading");
-            Check(t.Observe(T0.AddSeconds(2), Wh(80, 40)) == null, "normal interval is not sleep");
-            Check(t.Observe(T0.AddSeconds(4), null) == null, "failed read is not sleep");
-            for (int i = 3; i < 100; i++) Check(t.Observe(T0.AddSeconds(i * 2), null) == null, "failed reads keep attempts going");
+            Check(t.Observe(Up(T0), T0, Wh(80, 40)) == null, "no sleep on first reading");
+            Check(t.Observe(Up(T0.AddSeconds(2)), T0.AddSeconds(2), Wh(80, 40)) == null, "normal interval is not sleep");
+            Check(t.Observe(Up(T0.AddSeconds(4)), T0.AddSeconds(4), null) == null, "failed read is not sleep");
+            for (int i = 3; i < 100; i++) Check(t.Observe(Up(T0.AddSeconds(i * 2)), T0.AddSeconds(i * 2), null) == null, "failed reads keep attempts going");
             var after = T0.AddSeconds(200);
-            Check(t.Observe(after, Wh(80, 40)) == null, "long run of failed reads is not sleep");
+            Check(t.Observe(Up(after), after, Wh(80, 40)) == null, "long run of failed reads is not sleep");
 
             var wake = after.AddHours(7).AddMinutes(40);
-            var s = t.Observe(wake, Wh(76, 37.9));
-            Check(s != null && s.Kind == SessionRecord.SleepKind && s.Start == after && s.End == wake, "gap of hours is sleep");
+            var s = t.Observe(Up(wake), wake, Wh(76, 37.9));
+            Check(s != null && s.Kind == SessionRecord.SleepKind && s.Start == after.ToLocalTime() && s.End == wake.ToLocalTime() && Math.Abs(s.Seconds - (wake - after).TotalSeconds) < 1e-6, "gap of hours is sleep");
             Near(s.EnergyWh, -2.1, "sleep energy");
             Near(s.AverageW, -2.1 / (7 + 40 / 60.0), "sleep average power");
             Check(SleepTracker.Text(s) == "7 h 40 min asleep: -4% (-2.1 Wh, avg -0.27 W)", "sleep text", SleepTracker.Text(s));
-            Check(t.Observe(wake.AddSeconds(2), Wh(76, 37.9)) == null, "back to normal after waking");
+            Check(t.Observe(Up(wake.AddSeconds(2)), wake.AddSeconds(2), Wh(76, 37.9)) == null, "back to normal after waking");
 
             var u = new SleepTracker();
-            u.Observe(T0, new Reading { Percent = 60 });
-            var noEnergy = u.Observe(T0.AddMinutes(30), new Reading { Percent = 59 });
+            u.Observe(Up(T0), T0, new Reading { Percent = 60 });
+            var noEnergy = u.Observe(Up(T0.AddMinutes(30)), T0.AddMinutes(30), new Reading { Percent = 59 });
             Check(noEnergy != null && noEnergy.EnergyWh == null && SleepTracker.Text(noEnergy) == "30 min asleep: -1%", "sleep without energy data", SleepTracker.Text(noEnergy));
-            Check(u.Observe(T0.AddMinutes(60), null) == null && u.Observe(T0.AddMinutes(60).AddSeconds(2), new Reading { Percent = 58 }) == null,
-                  "a failed read right after waking takes the report; no double report");
+            Check(u.Observe(Up(T0.AddMinutes(60)), T0.AddMinutes(60), null) == null, "failed read right after waking: report waits");
+            var late = u.Observe(Up(T0.AddMinutes(60).AddSeconds(2)), T0.AddMinutes(60).AddSeconds(2), new Reading { Percent = 58 });
+            Check(late != null && Math.Abs(late.Seconds - 1802) < 1e-6 && late.StartPercent == 59 && late.EndPercent == 58,
+                  "sleep reported at the first good reading after waking", late?.Seconds);
+            Check(u.Observe(Up(T0.AddMinutes(60).AddSeconds(4)), T0.AddMinutes(60).AddSeconds(4), new Reading { Percent = 58 }) == null, "no double report");
+            var c = new SleepTracker();
+            c.Observe(Up(T0), T0, new Reading { Percent = 50 });
+            // the clock jumps 3 h forward but only 2 s of uptime pass: not sleep
+            Check(c.Observe(2, T0.AddHours(3), new Reading { Percent = 50 }) == null, "clock change is not sleep");
+            var d = new SleepTracker();
+            d.Observe(0, T0, new Reading { Percent = 50 });
+            // asleep 2 h while the clock was also set back 1 h: uptime still sees the 2 h
+            var back = d.Observe(7200, T0.AddHours(1), new Reading { Percent = 45 });
+            Check(back != null && Math.Abs(back.Seconds - 7200) < 1e-6, "sleep measured by uptime, not by the clock", back?.Seconds);
         }
 
         static void LogFiles()
@@ -370,6 +397,134 @@ namespace OrclCM.Tests
             finally { L.Bulgarian = false; }
         }
 
+        static void SessionBreaks()
+        {
+            var s = new Session();
+            s.Add(0, T0, -10, 80, false);
+            Check(s.SinceAppStart && s.Text(10).StartsWith("Since OrclCM started"), "first session is labelled as since OrclCM started", s.Text(10));
+            for (int i = 1; i <= 60; i++) s.Add(i * 2, T0.AddSeconds(i * 2), -10, 80 - i * 0.01, false);
+            var before = s.Break();  // sleep
+            Check(before != null && before.Kind == SessionRecord.BatteryKind && Math.Abs(before.Seconds - 120) < 1e-6, "break ends the session", before?.Seconds);
+            Check(s.Break() == null && s.Finish() == null && s.Text(130) == null, "break is idempotent");
+            Check(s.Add(30000, T0.AddHours(8), -9, 70, false) == null, "first reading after a break starts a new session without logging");
+            Check(!s.SinceAppStart && s.Start == 30000 && s.Samples == 1 && s.Text(30060).StartsWith("On battery for 1 min"), "new session after waking", s.Text(30060));
+            var fresh = new Session();
+            fresh.Add(0, T0, 5, 50, true);
+            Check(fresh.Add(2, T0.AddSeconds(2), -5, 50, false) == null && fresh.Text(4).StartsWith("On battery for"), "plug change ends the since-start label");
+        }
+
+        static void LogQueueAndCheckpoint()
+        {
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OrclCM-tests-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                System.IO.Directory.CreateDirectory(dir);
+                string sessions = System.IO.Path.Combine(dir, "sessions.csv"), checkpoint = System.IO.Path.Combine(dir, "current.csv");
+                int CheckpointRows() => System.IO.File.Exists(checkpoint) ? System.IO.File.ReadAllLines(checkpoint).Length - 1 : 0;
+                BatteryLog.UseCheckpoint(checkpoint, sessions);
+                var a = new SessionRecord { Kind = SessionRecord.PluggedKind, Start = T0, End = T0.AddHours(1), StartPercent = 20, EndPercent = 80, EnergyWh = 30 };
+                BatteryLog.AppendSession(sessions, a);
+                Check(CheckpointRows() == 0, "nothing pending, no checkpoint");
+
+                var open = new SessionRecord { Kind = SessionRecord.BatteryKind, Start = T0.AddHours(1), End = T0.AddHours(2), StartPercent = 80, EndPercent = 60 };
+                BatteryLog.SetOpenSession(open);
+                Check(CheckpointRows() == 1, "open session saved in the checkpoint");
+
+                // Excel opens CSV files with a write lock
+                using (var excel = new System.IO.FileStream(sessions, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read))
+                {
+                    BatteryLog.SetOpenSession(null);       // the session ends (plug change) ...
+                    BatteryLog.AppendSession(sessions, open);  // ... and is logged while the file is locked
+                    Check(BatteryLog.PendingCount == 1, "locked file: record kept in memory", BatteryLog.PendingCount);
+                    Check(CheckpointRows() == 1, "locked file: queued record kept in the checkpoint (survives a crash or exit)");
+                    Check(BatteryLog.LoadSessions(sessions).Count == 2, "locked file: log still readable, including the queued record");
+                }
+                BatteryLog.FlushPending();
+                Check(BatteryLog.PendingCount == 0 && System.IO.File.ReadAllLines(sessions).Length == 3 && CheckpointRows() == 0,
+                      "queued record written once the file is free, checkpoint removed");
+
+                // the app was killed while a session was open: the next start recovers it
+                System.IO.File.WriteAllText(checkpoint, BatteryLog.SessionsHeader + "\r\n" +
+                    BatteryLog.Line(new SessionRecord { Kind = SessionRecord.BatteryKind, Start = T0.AddHours(3), End = T0.AddHours(5), StartPercent = 90, EndPercent = 40 }) + "\r\n");
+                using (var excel = new System.IO.FileStream(sessions, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read))
+                {
+                    BatteryLog.UseCheckpoint(checkpoint, sessions);  // recovering while the log is locked
+                    Check(BatteryLog.PendingCount == 1 && CheckpointRows() == 1, "recovered record waits, still in the checkpoint");
+                }
+                BatteryLog.FlushPending();
+                var all = BatteryLog.LoadSessions(sessions);
+                Check(all.Count == 3 && all[2].EndPercent == 40 && CheckpointRows() == 0, "open session recovered after a crash, written once");
+                BatteryLog.UseCheckpoint(checkpoint, sessions);
+                Check(BatteryLog.LoadSessions(sessions).Count == 3, "no checkpoint, nothing recovered twice");
+            }
+            finally
+            {
+                BatteryLog.UseCheckpoint(null, null);
+                if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+            }
+        }
+
+        static void Updates()
+        {
+            Check(Updater.Compare("1.6.000", "1.5.000") > 0 && Updater.Compare("1.5.000", "1.5.000") == 0 && Updater.Compare("1.5.000", "1.10.000") < 0
+                  && Updater.Compare("v1.5.001", "1.5.000") > 0 && Updater.Compare("garbage", "1.0.000") < 0, "version comparison");
+            string json = "{\"url\":\"x\",\"html_url\":\"https://github.com/Oracooll/OrclCM/releases/tag/v9.1.002\",\"tag_name\":\"v9.1.002\"," +
+                          "\"assets\":[{\"name\":\"notes.txt\",\"browser_download_url\":\"https://github.com/Oracooll/OrclCM/releases/download/v9.1.002/notes.txt\"}," +
+                          "{\"name\":\"OrclCM.exe\",\"browser_download_url\":\"https://github.com/Oracooll/OrclCM/releases/download/v9.1.002/OrclCM.exe\"}]," +
+                          "\"body\":\"New stuff\\r\\n\\r\\nSHA-256 (OrclCM.exe): " + new string('a', 64) + "\"}";
+            var r = Updater.Parse(json);
+            Check(r.Version == "9.1.002" && r.DownloadUrl.EndsWith("/v9.1.002/OrclCM.exe") && r.PageUrl.EndsWith("/tag/v9.1.002") && r.Sha256 == new string('a', 64),
+                  "release JSON parsed", r.Version + " " + r.DownloadUrl + " " + r.Sha256);
+            Check(Updater.IsNewer(r) && !Updater.IsNewer(new ReleaseInfo { Version = AppInfo.Version }), "newer release detected");
+            Check(Updater.Parse("{\"tag_name\":\"v1.0.000\"}").DownloadUrl == null, "release without exe asset");
+            Check(Updater.CanInstall(r) && !Updater.CanInstall(new ReleaseInfo { DownloadUrl = r.DownloadUrl })
+                  && !Updater.CanInstall(new ReleaseInfo { Sha256 = r.Sha256 }), "self-install needs a download link and a checksum");
+            Check(Updater.Parse(json.Replace("https://github.com/Oracooll/OrclCM/releases/download/v9.1.002/OrclCM.exe", "https://evil.example/OrclCM.exe")).DownloadUrl == null,
+                  "download links outside this project are ignored");
+            bool threw = false;
+            try { Updater.Parse("{\"message\":\"Not Found\"}"); } catch (System.IO.InvalidDataException) { threw = true; }
+            Check(threw, "missing release reported as an error");
+
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OrclCM-tests-" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                string exe = System.IO.Path.Combine(dir, "a.exe");
+                var bytes = new byte[4096]; bytes[0] = (byte)'M'; bytes[1] = (byte)'Z';
+                System.IO.File.WriteAllBytes(exe, bytes);
+                string hash;
+                using (var sha = System.Security.Cryptography.SHA256.Create()) hash = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+                bool ok = true;
+                try { Updater.Verify(exe, hash); } catch { ok = false; }
+                Check(ok, "valid download accepted");
+                bool noHash = false;
+                try { Updater.Verify(exe, null); } catch (System.IO.InvalidDataException) { noHash = true; }
+                Check(noHash, "download without a published checksum is rejected");
+                bool rejected = false;
+                try { Updater.Verify(exe, new string('0', 64)); } catch (System.IO.InvalidDataException) { rejected = true; }
+                Check(rejected, "checksum mismatch rejected");
+                System.IO.File.WriteAllText(exe, "<html>not an exe</html>" + new string(' ', 2000));
+                rejected = false;
+                try { Updater.Verify(exe, hash); } catch (System.IO.InvalidDataException) { rejected = true; }
+                Check(rejected, "non-program download rejected");
+
+                // swap a "running" exe: the current file is renamed, the new one takes its place
+                string current = System.IO.Path.Combine(dir, "OrclCM.exe"), fresh = current + ".new";
+                System.IO.File.WriteAllText(current, "old");
+                System.IO.File.WriteAllText(fresh, "new");
+                System.IO.File.Move(current, current + ".old");
+                System.IO.File.Move(fresh, current);
+                Check(System.IO.File.ReadAllText(current) == "new", "update swap");
+                Updater.CleanUp(current);
+                Check(!System.IO.File.Exists(current + ".old") && !System.IO.File.Exists(fresh), "update leftovers removed");
+            }
+            finally { System.IO.Directory.Delete(dir, true); }
+
+            var st = Settings.Parse(new Settings { AutoUpdateCheck = false, LastUpdateCheckUtc = new DateTime(2026, 10, 8, 7, 30, 0, DateTimeKind.Utc) }.Serialize());
+            Check(!st.AutoUpdateCheck && st.LastUpdateCheckUtc == new DateTime(2026, 10, 8, 7, 30, 0, DateTimeKind.Utc), "update settings round trip", st.LastUpdateCheckUtc);
+            Check(Settings.Parse("").AutoUpdateCheck, "automatic update check on by default");
+        }
+
         static string FirstArgument(string code, int start, bool firstOnly)
         {
             int depth = 0;
@@ -419,7 +574,17 @@ namespace OrclCM.Tests
             Check(d.Check(P(50, true, -5), set, 300).Count == 0, "drain alert fires once");
             d.Check(P(50, true, 10), set, 302);
             d.Check(P(50, true, -5), set, 304);
-            Check(d.Check(P(50, true, -5), set, 304 + Alerts.DrainSeconds).Count == 1, "drain re-arms after charging resumes");
+            Check(d.Check(P(50, true, -5), set, 304 + Alerts.DrainSeconds).Count == 0, "brief recovery does not re-arm the drain alert");
+            d.Check(P(50, true, 10), set, 400);
+            d.Check(P(50, true, 10), set, 400 + Alerts.DrainSeconds);
+            d.Check(P(50, true, -5), set, 470);
+            Check(d.Check(P(50, true, -5), set, 470 + Alerts.DrainSeconds).Count == 1, "drain re-arms after a minute of charging");
+            var z = new Alerts();
+            z.Check(P(50, true, -5), set, 0);
+            z.Check(new Reading { Percent = 50, Plugged = true, Watts = null }, set, 30);
+            Check(z.Check(P(50, true, -5), set, Alerts.DrainSeconds).Count == 1, "unknown rate keeps the drain timer");
+            Check(z.Check(new Reading { Percent = 50, Plugged = true, Watts = null }, set, 200).Count == 0
+                  && z.Check(P(50, true, -5), set, 202).Count == 0, "unknown rate does not re-arm");
 
             var off = new Settings { AlertHighEnabled = false, AlertLowEnabled = false, AlertDraining = false };
             var q = new Alerts();

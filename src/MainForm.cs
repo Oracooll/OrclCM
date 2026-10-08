@@ -21,7 +21,7 @@ namespace OrclCM
         const int CmdTopMost = 0x100, CmdAutostart = 0x110, CmdThemeSystem = 0x120, CmdThemeDark = 0x130, CmdThemeLight = 0x140,
                   CmdRange0 = 0x150, CmdRange1 = 0x160, CmdRange2 = 0x170, CmdSettings = 0x180, CmdExport = 0x190,
                   CmdHelp = 0x1A0, CmdAbout = 0x1B0, CmdExit = 0x1C0, CmdMini = 0x1D0, CmdLog = 0x1E0,
-                  CmdLangSystem = 0x1F0, CmdLangEnglish = 0x200, CmdLangBulgarian = 0x210;
+                  CmdLangSystem = 0x1F0, CmdLangEnglish = 0x200, CmdLangBulgarian = 0x210, CmdUpdate = 0x220;
         static readonly string[] RangeKeys = { "4 min", "1 h", "24 h" };
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -35,12 +35,16 @@ namespace OrclCM
         readonly Alerts alerts = new Alerts();
         readonly NotifyIcon tray;
         readonly ContextMenuStrip menu;
-        readonly Timer uiTimer;
+        readonly Timer uiTimer, updateTimer;
+        ReleaseInfo offeredUpdate;
+        bool balloonIsUpdate, checkingUpdates, downloadingUpdate, exitAfterDialog;
+        Action deferredInstall;
         readonly bool startHidden;
         readonly Font bigFont = new Font("Segoe UI", 34, FontStyle.Bold);
         readonly Font statusFont = new Font("Segoe UI", 12);
         readonly Font detailFont = new Font("Segoe UI", 9.5f);
         readonly Font smallFont = new Font("Segoe UI", 8.25f);
+        Font boldMenuFont;
         readonly Rectangle[] rangeHit = new Rectangle[3];
         MiniForm mini;
         View view = Present.Describe(null, null, 0);
@@ -48,6 +52,7 @@ namespace OrclCM
         bool drawHigh;
         int lastSeq = -1;
         DateTime healthDay;
+        double lastCheckpoint;
         string trayKey;
         Icon trayImage, appIcon;
         bool exiting, dialogOpen;
@@ -90,8 +95,16 @@ namespace OrclCM
             UpdateTray();
             tray.Visible = true;
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+            SystemEvents.TimeChanged += OnTimeChanged;
+            BatteryLog.UseCheckpoint(BatteryLog.CheckpointPath, BatteryLog.SessionsPath);
             try { autostart.RefreshPath(Application.ExecutablePath); } catch { }
             if (settings.MiniMode) SetMini(true);
+
+            tray.BalloonTipClicked += (s, e) => { if (offeredUpdate != null && balloonIsUpdate) OfferUpdate(offeredUpdate); };
+            tray.BalloonTipClosed += (s, e) => balloonIsUpdate = false;
+            updateTimer = new Timer { Interval = 30_000 };  // first automatic check 30 s after start, then hourly ticks
+            updateTimer.Tick += (s, e) => { updateTimer.Interval = 3_600_000; AutoCheckForUpdates(); };
+            updateTimer.Start();
 
             uiTimer = new Timer { Interval = 500 };
             uiTimer.Tick += (s, e) => RefreshView();
@@ -181,18 +194,150 @@ namespace OrclCM
                 SaveSettings();
                 return;
             }
+            // Exit, Task Manager, or Windows asking to end the session. A shutdown can still be
+            // cancelled after this, so only persist here; tear down in OnFormClosed.
             RememberBounds();
             SaveSettings();
-            var open = session.Finish();
-            if (open != null) BatteryLog.AppendSession(BatteryLog.SessionsPath, open);
+            LogSession(session.Break());
+            BatteryLog.SetOpenSession(null);
+            BatteryLog.FlushPending();  // anything still locked stays in the checkpoint for the next start
+            base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
             SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            SystemEvents.TimeChanged -= OnTimeChanged;
             uiTimer.Stop();
+            updateTimer.Stop();
             poller.Stop();
             mini?.Close();
             tray.Visible = false;
             tray.Dispose();
             trayImage?.Dispose();
-            base.OnFormClosing(e);
+            base.OnFormClosed(e);
+        }
+
+        // ------------------------------------------------------------------ updates
+        void AutoCheckForUpdates()
+        {
+            if (!settings.AutoUpdateCheck) return;
+            if (settings.LastUpdateCheckUtc.HasValue && (DateTime.UtcNow - settings.LastUpdateCheckUtc.Value).TotalHours < 23) return;
+            CheckForUpdates(manual: false);
+        }
+
+        void CheckForUpdates(bool manual)
+        {
+            if (checkingUpdates || downloadingUpdate) return;
+            checkingUpdates = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                ReleaseInfo latest = null;
+                Exception error = null;
+                try { latest = Updater.FetchLatest(); } catch (Exception e) { error = e; }
+                try { BeginInvoke((Action)(() => UpdateChecked(latest, error, manual))); } catch (InvalidOperationException) { }
+            });
+        }
+
+        void UpdateChecked(ReleaseInfo latest, Exception error, bool manual)
+        {
+            checkingUpdates = false;
+            if (error == null)
+            {
+                settings.LastUpdateCheckUtc = DateTime.UtcNow;
+                SaveSettings();
+            }
+            if (error != null)
+            {
+                if (manual) MessageBox.Show(DialogOwner, L.F("Could not check for updates:\n{0}", error.Message), AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (!Updater.IsNewer(latest))
+            {
+                if (manual) MessageBox.Show(DialogOwner, L.F("You have the latest version ({0}).", AppInfo.Version), AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            offeredUpdate = latest;
+            if (manual) OfferUpdate(latest);
+            else
+            {
+                balloonIsUpdate = true;
+                tray.ShowBalloonTip(15000, L.F("OrclCM {0} is available", latest.Version), L.F("Click to update (you have {0}).", AppInfo.Version), ToolTipIcon.Info);
+            }
+        }
+
+        void OfferUpdate(ReleaseInfo r)
+        {
+            if (downloadingUpdate) return;
+            RunDialog(() =>
+            {
+                var answer = MessageBox.Show(DialogOwner,
+                    L.F("OrclCM {0} is available (you have {1}).\n\nDownload and install it now? OrclCM will restart.", r.Version, AppInfo.Version),
+                    AppInfo.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) return;
+                if (!Updater.CanInstall(r)) { OpenUrl(r.PageUrl); return; }  // no verifiable download: let the user get it
+                string exe = Application.ExecutablePath;
+                downloadingUpdate = true;
+                tray.Text = L.T("Downloading update…");
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    string downloaded = null;
+                    Exception error = null;
+                    try { downloaded = Updater.Download(r, exe); } catch (Exception e) { error = e; }
+                    try { BeginInvoke((Action)(() => InstallDownloaded(r, downloaded, error))); } catch (InvalidOperationException) { }
+                });
+            });
+        }
+
+        void InstallDownloaded(ReleaseInfo r, string downloaded, Exception error)
+        {
+            if (dialogOpen)
+            {
+                // a dialog's modal loop is running: install once it closes, never underneath it
+                deferredInstall = () => InstallDownloaded(r, downloaded, error);
+                RunDialog(null);
+                return;
+            }
+            downloadingUpdate = false;
+            if (error == null)
+            {
+                try
+                {
+                    // persist everything first, then hand over to the new version
+                    RememberBounds();
+                    SaveSettings();
+                    LogSession(session.Break());
+                    BatteryLog.FlushPending();
+                    Updater.InstallAndRestart(downloaded, Application.ExecutablePath);
+                    exiting = true;
+                    Close();
+                    return;
+                }
+                catch (Exception e) { error = e; }
+            }
+            exitAfterDialog = false;
+            MessageBox.Show(DialogOwner, L.F("Could not install the update:\n{0}\n\nThe release page will open so you can download it yourself.", error.Message),
+                            AppInfo.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            OpenUrl(r.PageUrl);
+        }
+
+        static void OpenUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url) || !url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase)) url = InfoForms.RepoUrl + "/releases";
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); } catch (Exception) { }
+        }
+
+        void LogSession(SessionRecord ended)
+        {
+            if (ended == null) return;
+            BatteryLog.SetOpenSession(null);  // the ended session moves from the checkpoint to the log
+            BatteryLog.AppendSession(BatteryLog.SessionsPath, ended);
+        }
+
+        void OnTimeChanged(object sender, EventArgs e)
+        {
+            TimeZoneInfo.ClearCachedData();  // .NET caches the time zone; refresh it after travel
+            System.Globalization.CultureInfo.CurrentCulture.ClearCachedData();
         }
 
         // ------------------------------------------------------------------ commands (shared by all menus)
@@ -233,8 +378,11 @@ namespace OrclCM
                 case CmdSettings: ShowSettings(); break;
                 case CmdExport: ExportHistory(); break;
                 case CmdHelp: RunDialog(() => InfoForms.ShowHelp(DialogOwner, appIcon)); break;
-                case CmdAbout: RunDialog(() => InfoForms.ShowAbout(DialogOwner, appIcon)); break;
-                case CmdExit: exiting = true; Close(); break;
+                case CmdAbout: RunDialog(() => InfoForms.ShowAbout(DialogOwner, appIcon, () => CheckForUpdates(manual: true))); break;
+                case CmdUpdate: CheckForUpdates(manual: true); break;
+                case CmdExit:
+                    if (dialogOpen) { exitAfterDialog = true; RunDialog(null); break; }  // finish the dialog first
+                    exiting = true; Close(); break;
                 default: return false;
             }
             return true;
@@ -244,9 +392,20 @@ namespace OrclCM
 
         void RunDialog(Action show)
         {
-            if (dialogOpen) return;
+            if (dialogOpen)
+            {
+                foreach (Form f in Application.OpenForms)  // already open: bring it back instead of doing nothing
+                    if (f.Modal) { if (f.WindowState == FormWindowState.Minimized) f.WindowState = FormWindowState.Normal; f.Activate(); }
+                return;
+            }
             dialogOpen = true;
-            try { show(); } finally { dialogOpen = false; }
+            try { show(); }
+            finally
+            {
+                dialogOpen = false;
+                if (deferredInstall != null) { var install = deferredInstall; deferredInstall = null; BeginInvoke(install); }
+                else if (exitAfterDialog) BeginInvoke((Action)(() => { exiting = true; Close(); }));
+            }
         }
 
         void SetTopMost(bool on)
@@ -370,12 +529,13 @@ namespace OrclCM
         // ------------------------------------------------------------------ tray / mini / window right-click menu
         void BuildMenu()
         {
+            foreach (var old in menu.Items.Cast<ToolStripItem>().ToList()) old.Dispose();
             menu.Items.Clear();
             ToolStripMenuItem Item(string key, int cmd) =>
                 new ToolStripMenuItem(L.T(key), null, (s, e) => Execute(cmd)) { Tag = cmd };
 
             var show = new ToolStripMenuItem(L.T("Show / hide window"), null, (s, e) => ToggleWindow());
-            show.Font = new Font(menu.Font, FontStyle.Bold);
+            show.Font = boldMenuFont ?? (boldMenuFont = new Font(menu.Font, FontStyle.Bold));
             var theme = new ToolStripMenuItem(L.T("Theme"));
             theme.DropDownItems.AddRange(new ToolStripItem[] { Item("System", CmdThemeSystem), Item("Dark", CmdThemeDark), Item("Light", CmdThemeLight) });
             var language = new ToolStripMenuItem(L.T("Language"));
@@ -396,7 +556,7 @@ namespace OrclCM
                 new ToolStripSeparator(),
                 Item("Battery log…", CmdLog), Item("Settings…", CmdSettings), Item("Export history…", CmdExport),
                 new ToolStripSeparator(),
-                Item("Help", CmdHelp), Item("About OrclCM", CmdAbout),
+                Item("Check for updates…", CmdUpdate), Item("Help", CmdHelp), Item("About OrclCM", CmdAbout),
                 new ToolStripSeparator(),
                 Item("Exit", CmdExit),
             });
@@ -463,6 +623,7 @@ namespace OrclCM
             Add(systemMenu, CmdSettings, L.T("Settings…"));
             Add(systemMenu, CmdExport, L.T("Export history…"));
             Sep();
+            Add(systemMenu, CmdUpdate, L.T("Check for updates…"));
             Add(systemMenu, CmdHelp, L.T("Help"));
             Add(systemMenu, CmdAbout, L.T("About OrclCM"));
             Sep();
@@ -527,24 +688,30 @@ namespace OrclCM
                 if (r != null) Present.Classify(r, out _, out label);
                 history.Add(new Sample { At = at, Time = st.Attempt.Time, Watts = r?.Watts, Percent = r?.Percent, Plugged = r?.Plugged, State = label ?? L.T("read failed") });
 
-                var slept = sleep.Observe(at, r);
+                var slept = sleep.Observe(Uptime.Seconds, DateTime.UtcNow, r);
                 if (slept != null)
                 {
+                    LogSession(session.Break());  // sessions don't span sleep
                     BatteryLog.AppendSession(BatteryLog.SessionsPath, slept);
                     if (settings.AlertSleep && slept.StartPercent - slept.EndPercent >= 1)
-                        tray.ShowBalloonTip(10000, L.T("Battery use during sleep"), SleepTracker.Text(slept), ToolTipIcon.Info);
+                    { balloonIsUpdate = false; tray.ShowBalloonTip(10000, L.T("Battery use during sleep"), SleepTracker.Text(slept), ToolTipIcon.Info); }
                 }
                 if (r != null)
                 {
-                    var ended = session.Add(st.Attempt.Time, at, r.Watts, r.Percent, r.Plugged);
-                    if (ended != null) BatteryLog.AppendSession(BatteryLog.SessionsPath, ended);
+                    LogSession(session.Add(st.Attempt.Time, at, r.Watts, r.Percent, r.Plugged));
+                    if (now - lastCheckpoint >= 300)
+                    {
+                        lastCheckpoint = now;
+                        BatteryLog.SetOpenSession(session.Finish());
+                        BatteryLog.FlushPending();
+                    }
                     if (healthDay != at.Date && r.FullWh.HasValue)
                     {
                         healthDay = at.Date;
                         BatteryLog.RecordHealth(BatteryLog.HealthPath, at, r);
                     }
                     foreach (var a in alerts.Check(r, settings, now))
-                        tray.ShowBalloonTip(10000, a.Title, a.Text, ToolTipIcon.Warning);
+                    { balloonIsUpdate = false; tray.ShowBalloonTip(10000, a.Title, a.Text, ToolTipIcon.Warning); }
                 }
             }
 
@@ -580,7 +747,7 @@ namespace OrclCM
                 old?.Dispose();
                 trayKey = key;
             }
-            string tip = view.Tooltip ?? AppInfo.Name;
+            string tip = downloadingUpdate ? L.T("Downloading update…") : view.Tooltip ?? AppInfo.Name;
             tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;  // NotifyIcon limit
         }
 

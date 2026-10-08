@@ -55,6 +55,7 @@ namespace OrclCM
             ["{0} cycles"] = "{0} цикъла",
             ["Plugged in for {0} · {1} Wh · avg {2} W · peak {3} W"] = "Включено от {0} · {1} Wh · средно {2} W · пик {3} W",
             ["On battery for {0} · {1} Wh · avg {2} W · peak {3} W"] = "На батерия от {0} · {1} Wh · средно {2} W · пик {3} W",
+            ["Since OrclCM started {0} · {1} Wh · avg {2} W · peak {3} W"] = "От стартирането на OrclCM {0} · {1} Wh · средно {2} W · пик {3} W",
             ["Laptop using {0} W"] = "Лаптопът консумира {0} W",
             ["Laptop using {0} W — higher than usual"] = "Лаптопът консумира {0} W – повече от обичайното",
 
@@ -114,6 +115,23 @@ namespace OrclCM
             ["No readings recorded yet."] = "Все още няма отчитания.",
             ["Could not save the file:\n{0}"] = "Файлът не може да бъде записан:\n{0}",
             ["Could not change Start with Windows:\n{0}"] = "Стартирането с Windows не може да бъде променено:\n{0}",
+
+            // updates
+            ["Check for updates…"] = "Проверка за актуализации…",
+            ["Check for updates"] = "Проверка за актуализации",
+            ["Check for updates automatically"] = "Автоматична проверка за актуализации",
+            ["OrclCM {0} is available"] = "Налична е OrclCM {0}",
+            ["Click to update (you have {0})."] = "Щракнете, за да актуализирате (имате {0}).",
+            ["OrclCM {0} is available (you have {1}).\n\nDownload and install it now? OrclCM will restart."] =
+                "Налична е OrclCM {0} (имате {1}).\n\nДа се изтегли и инсталира ли сега? OrclCM ще се рестартира.",
+            ["You have the latest version ({0})."] = "Имате най-новата версия ({0}).",
+            ["Could not check for updates:\n{0}"] = "Проверката за актуализации е неуспешна:\n{0}",
+            ["Could not install the update:\n{0}\n\nThe release page will open so you can download it yourself."] =
+                "Актуализацията не може да бъде инсталирана:\n{0}\n\nЩе се отвори страницата на версията, за да я изтеглите ръчно.",
+            ["The download is not a valid program."] = "Изтегленият файл не е валидна програма.",
+            ["The download does not match the published checksum."] = "Изтегленият файл не съвпада с публикуваната контролна сума.",
+            ["Downloading update…"] = "Изтегляне на актуализацията…",
+            ["The new version did not start."] = "Новата версия не стартира.",
 
             // battery log window
             ["Battery log"] = "Дневник на батерията",

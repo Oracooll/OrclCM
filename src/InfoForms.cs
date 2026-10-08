@@ -20,13 +20,14 @@ namespace OrclCM
             };
         }
 
-        public static void ShowAbout(IWin32Window owner, Icon icon)
+        public static void ShowAbout(IWin32Window owner, Icon icon, Action checkForUpdates)
         {
             using (var f = Dialog(L.T("About OrclCM"), icon))
+            using (var logo = icon != null ? new Icon(icon, 48, 48).ToBitmap() : null)
             {
                 var stack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill };
-                if (icon != null)
-                    stack.Controls.Add(new PictureBox { Image = new Icon(icon, 48, 48).ToBitmap(), SizeMode = PictureBoxSizeMode.AutoSize });
+                if (logo != null)
+                    stack.Controls.Add(new PictureBox { Image = logo, SizeMode = PictureBoxSizeMode.AutoSize });
                 stack.Controls.Add(new Label { Text = AppInfo.Name, AutoSize = true, Font = new Font("Segoe UI", 16, FontStyle.Bold) });
                 stack.Controls.Add(new Label { Text = L.F("Version {0}", AppInfo.Version), AutoSize = true });
                 stack.Controls.Add(new Label
@@ -40,11 +41,18 @@ namespace OrclCM
                 var link = new LinkLabel { Text = RepoUrl, AutoSize = true, Margin = new Padding(3, 10, 3, 3) };
                 link.LinkClicked += (s, e) => Open(RepoUrl);
                 stack.Controls.Add(link);
-                var ok = new Button { Text = L.T("OK"), DialogResult = DialogResult.OK, AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(3, 14, 3, 3) };
-                stack.Controls.Add(ok);
+                var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(0, 14, 0, 0) };
+                var ok = new Button { Text = L.T("OK"), DialogResult = DialogResult.OK, AutoSize = true };
+                var update = new Button { Text = L.T("Check for updates"), AutoSize = true };
+                bool wantUpdate = false;
+                update.Click += (s, e) => { wantUpdate = true; f.Close(); };
+                buttons.Controls.Add(ok);
+                buttons.Controls.Add(update);
+                stack.Controls.Add(buttons);
                 f.AcceptButton = f.CancelButton = ok;
                 f.Controls.Add(stack);
                 f.ShowDialog(owner);
+                if (wantUpdate) checkForUpdates?.Invoke();
             }
         }
 
@@ -86,6 +94,9 @@ Notifications when the battery is charged to a limit (e.g. 80% - good for batter
 EXPORT
 Export history saves up to the last 24 hours of readings as a CSV file (opens in Excel).
 
+UPDATES
+Check for updates (menu, or the button in About) looks for a newer OrclCM on GitHub and can download and install it - the download is checked against the published checksum, then OrclCM restarts. OrclCM also checks once a day by itself (can be turned off in Settings).
+
 Settings are stored in %APPDATA%\OrclCM\settings.ini.";
 
         const string HelpBulgarian =
@@ -125,6 +136,9 @@ OrclCM стои в областта за уведомяване (без буто
 
 ЕКСПОРТ
 „Експорт на историята“ записва до последните 24 часа отчитания като CSV файл (отваря се с Excel).
+
+АКТУАЛИЗАЦИИ
+„Проверка за актуализации“ (в менюто или бутонът в „За OrclCM“) търси по-нова версия на OrclCM в GitHub и може да я изтегли и инсталира – изтеглянето се проверява спрямо публикуваната контролна сума, след което OrclCM се рестартира. OrclCM проверява и сам веднъж дневно (може да се изключи в Настройки).
 
 Настройките се пазят в %APPDATA%\OrclCM\settings.ini.";
 

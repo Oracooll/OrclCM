@@ -15,7 +15,7 @@ namespace OrclCM
     {
         public const string Name = "OrclCM";
         // Shown in the window title bar. Format 1.X.XXX; keep FileVersion in step (tests check it).
-        public const string Version = "1.5.000";
-        public const string FileVersion = "1.5.0.0";
+        public const string Version = "1.6.000";
+        public const string FileVersion = "1.6.0.0";
     }
 }

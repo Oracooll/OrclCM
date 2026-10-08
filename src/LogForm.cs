@@ -99,7 +99,8 @@ namespace OrclCM
             var g = e.Graphics;
             var r = new Rectangle(12, 28, panel.Width - 24, panel.Height - 46);
             g.Clear(SystemColors.Window);
-            TextRenderer.DrawText(g, L.T("Battery health over time"), new Font(Font, FontStyle.Bold), new Point(10, 6), SystemColors.ControlText);
+            using (var bold = new Font(Font, FontStyle.Bold))
+                TextRenderer.DrawText(g, L.T("Battery health over time"), bold, new Point(10, 6), SystemColors.ControlText);
             using (var frame = new Pen(SystemColors.ControlDark)) g.DrawRectangle(frame, r);
             if (health.Count == 0)
             {

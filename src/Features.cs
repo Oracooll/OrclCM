@@ -68,11 +68,12 @@ namespace OrclCM
     sealed class SessionRecord
     {
         public const string PluggedKind = "plugged", BatteryKind = "battery", SleepKind = "sleep";
-        public DateTime Start, End;
+        public DateTime Start, End;  // local time, as shown and logged
         public string Kind;
         public double? StartPercent, EndPercent, EnergyWh, AverageW, PeakW;
+        public double? DurationSeconds;  // exact length; Start/End can jump with DST or time-zone changes
 
-        public double Seconds => (End - Start).TotalSeconds;
+        public double Seconds => DurationSeconds ?? (End - Start).TotalSeconds;
     }
 
     /// <summary>Statistics since the charger was last plugged in or unplugged.</summary>
@@ -88,6 +89,10 @@ namespace OrclCM
         DateTime startAt, lastAt;
         double? startPercent, lastPercent;
         int count;
+        bool firstSinceStart = true, breakRequested;
+
+        /// <summary>True while the current session began when OrclCM started, not at a plug change.</summary>
+        public bool SinceAppStart { get; private set; }
 
         public int Samples => count;
         public double? Average => count > 0 ? sum / count : (double?)null;
@@ -97,10 +102,13 @@ namespace OrclCM
         public SessionRecord Add(double time, DateTime at, double? watts, double? percent, bool? plugged)
         {
             SessionRecord finished = null;
-            if (plugged.HasValue && plugged != Plugged)
+            if (plugged.HasValue && (plugged != Plugged || breakRequested))
             {
-                finished = Finish();
-                Plugged = plugged; Start = time; startAt = at; startPercent = percent;
+                finished = breakRequested ? null : Finish();
+                SinceAppStart = firstSinceStart && !breakRequested;
+                firstSinceStart = false;
+                breakRequested = false;
+                Plugged = plugged; Start = time; startAt = at; startPercent = percent; lastPercent = percent;
                 EnergyWh = 0; Peak = 0; sum = 0; count = 0; last = -1;
             }
             lastTime = time; lastAt = at;
@@ -116,23 +124,33 @@ namespace OrclCM
             return finished;
         }
 
-        /// <summary>The current session as a log record (when the app exits), or null if too short.</summary>
+        /// <summary>The current session as a log record, or null if too short (or already ended by Break).</summary>
         public SessionRecord Finish()
         {
-            if (!Plugged.HasValue || count == 0 || lastTime - Start < MinLogged) return null;
+            if (breakRequested || !Plugged.HasValue || count == 0 || lastTime - Start < MinLogged) return null;
             return new SessionRecord
             {
                 Kind = Plugged.Value ? SessionRecord.PluggedKind : SessionRecord.BatteryKind,
                 Start = startAt, End = lastAt, StartPercent = startPercent, EndPercent = lastPercent,
-                EnergyWh = EnergyWh, AverageW = Average, PeakW = Peak,
+                EnergyWh = EnergyWh, AverageW = Average, PeakW = Peak, DurationSeconds = lastTime - Start,
             };
+        }
+
+        /// <summary>Ends the current session (before sleep, at shutdown); the next reading starts a
+        /// new one even if the plug state is unchanged. Returns the ended session if long enough.</summary>
+        public SessionRecord Break()
+        {
+            var ended = Finish();
+            if (Plugged.HasValue) breakRequested = true;
+            return ended;
         }
 
         public string Text(double now)
         {
-            if (!Plugged.HasValue || count == 0) return null;
+            if (!Plugged.HasValue || count == 0 || breakRequested) return null;
             var inv = CultureInfo.InvariantCulture;
-            return L.F(Plugged.Value ? "Plugged in for {0} · {1} Wh · avg {2} W · peak {3} W" : "On battery for {0} · {1} Wh · avg {2} W · peak {3} W",
+            return L.F(SinceAppStart ? "Since OrclCM started {0} · {1} Wh · avg {2} W · peak {3} W"
+                       : Plugged.Value ? "Plugged in for {0} · {1} Wh · avg {2} W · peak {3} W" : "On battery for {0} · {1} Wh · avg {2} W · peak {3} W",
                        Estimates.Duration(now - Start), EnergyWh.ToString(Math.Abs(EnergyWh) < 1 ? "+0.00;-0.00;0.00" : "+0.0;-0.0;0.0", inv),
                        Average.Value.ToString("+0.0;-0.0;0.0", inv), Peak.ToString("+0.0;-0.0;0.0", inv));
         }
@@ -143,25 +161,38 @@ namespace OrclCM
     sealed class SleepTracker
     {
         public const double MinGapSeconds = 120;
-        DateTime? lastAttempt, lastGoodAt;
+        double? lastAttempt, gapStart;  // system uptime in seconds (Uptime.Seconds)
+        DateTime gapStartUtc;
         Reading lastGood;
 
-        public SessionRecord Observe(DateTime at, Reading reading)
+        /// <summary>Call once per read attempt. <paramref name="uptime"/> is the system uptime,
+        /// which keeps counting during sleep and is not affected by clock, DST or time-zone changes;
+        /// <paramref name="utcNow"/> is only used for the times shown in the log.
+        /// Returns a sleep record at the first good reading after a gap.</summary>
+        public SessionRecord Observe(double uptime, DateTime utcNow, Reading reading)
         {
+            if (lastAttempt.HasValue && lastGood != null && !gapStart.HasValue && uptime - lastAttempt.Value >= MinGapSeconds)
+            {
+                gapStart = lastAttempt;  // kept until a good reading arrives, even if the first reads after waking fail
+                gapStartUtc = utcNow.AddSeconds(lastAttempt.Value - uptime);
+            }
+            lastAttempt = uptime;
+            if (reading == null) return null;
+
             SessionRecord sleep = null;
-            if (reading != null && lastAttempt.HasValue && lastGood != null && (at - lastAttempt.Value).TotalSeconds >= MinGapSeconds)
+            if (gapStart.HasValue)
             {
                 double? wh = reading.RemainingWh.HasValue && lastGood.RemainingWh.HasValue ? reading.RemainingWh - lastGood.RemainingWh : null;
-                double hours = (at - lastGoodAt.Value).TotalHours;
+                double seconds = uptime - gapStart.Value;
                 sleep = new SessionRecord
                 {
-                    Kind = SessionRecord.SleepKind, Start = lastGoodAt.Value, End = at,
+                    Kind = SessionRecord.SleepKind, Start = gapStartUtc.ToLocalTime(), End = utcNow.ToLocalTime(), DurationSeconds = seconds,
                     StartPercent = lastGood.Percent, EndPercent = reading.Percent,
-                    EnergyWh = wh, AverageW = wh.HasValue && hours > 0 ? wh / hours : null,
+                    EnergyWh = wh, AverageW = wh.HasValue && seconds > 0 ? wh / (seconds / 3600) : null,
                 };
+                gapStart = null;
             }
-            lastAttempt = at;
-            if (reading != null) { lastGood = reading; lastGoodAt = at; }
+            lastGood = reading;
             return sleep;
         }
 
@@ -177,6 +208,13 @@ namespace OrclCM
         }
     }
 
+    /// <summary>System uptime in seconds: monotonic, includes time asleep, unaffected by clock changes.</summary>
+    static class Uptime
+    {
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+        public static double Seconds => GetTickCount64() / 1000.0;
+    }
+
     /// <summary>Battery log files in %APPDATA%\OrclCM: sessions.csv and health.csv.</summary>
     static class BatteryLog
     {
@@ -187,6 +225,7 @@ namespace OrclCM
 
         public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), AppInfo.Name);
         public static string SessionsPath => Path.Combine(Folder, "sessions.csv");
+        public static string CheckpointPath => Path.Combine(Folder, "current-session.csv");
         public static string HealthPath => Path.Combine(Folder, "health.csv");
 
         static string N(double? v, string format) => v.HasValue ? v.Value.ToString(format, Inv) : "";
@@ -198,10 +237,53 @@ namespace OrclCM
 
         public static void AppendSession(string path, SessionRecord r) => Append(path, SessionsHeader, Line(r));
 
+        // Crash safety: the checkpoint file always holds every session line not yet in sessions.csv
+        // (queued because the file was locked) plus the session still in progress. It is rewritten
+        // whenever either changes and deleted when both are empty.
+        static string checkpointFile, checkpointSessions;
+        static SessionRecord openSession;
+
+        /// <summary>At startup: turn on the checkpoint and recover what an unclean exit left behind.</summary>
+        public static void UseCheckpoint(string checkpointPath, string sessionsPath)
+        {
+            checkpointFile = checkpointPath;
+            checkpointSessions = sessionsPath;
+            openSession = null;
+            if (checkpointPath == null) return;
+            var left = new List<string>();
+            foreach (var cols in Rows(checkpointPath)) left.Add(string.Join(",", cols));
+            foreach (var line in left) pending.Add(new PendingLine { Path = sessionsPath, Header = SessionsHeader, Line = line });
+            FlushPending();  // also rewrites or removes the checkpoint
+        }
+
+        /// <summary>The session in progress (null when none), saved in the checkpoint.</summary>
+        public static void SetOpenSession(SessionRecord open)
+        {
+            openSession = open;
+            WriteCheckpoint();
+        }
+
+        static void WriteCheckpoint()
+        {
+            if (checkpointFile == null) return;
+            try
+            {
+                var lines = pending.Where(p => p.Path == checkpointSessions).Select(p => p.Line).ToList();
+                if (openSession != null) lines.Add(Line(openSession));
+                if (lines.Count == 0) { if (File.Exists(checkpointFile)) File.Delete(checkpointFile); return; }
+                Directory.CreateDirectory(Path.GetDirectoryName(checkpointFile));
+                string tmp = checkpointFile + ".tmp";
+                File.WriteAllText(tmp, SessionsHeader + "\r\n" + string.Join("\r\n", lines) + "\r\n");
+                if (File.Exists(checkpointFile)) File.Replace(tmp, checkpointFile, null);
+                else File.Move(tmp, checkpointFile);
+            }
+            catch (Exception) { }
+        }
+
         public static List<SessionRecord> LoadSessions(string path)
         {
             var list = new List<SessionRecord>();
-            foreach (var cols in Rows(path))
+            foreach (var cols in Rows(path).Concat(pending.Where(p => p.Path == path).Select(p => p.Line.Split(','))))
             {
                 if (cols.Length < 8 || !DateTime.TryParseExact(cols[0], TimeFormat, Inv, DateTimeStyles.None, out DateTime start)
                     || !DateTime.TryParseExact(cols[1], TimeFormat, Inv, DateTimeStyles.None, out DateTime end)) continue;
@@ -246,22 +328,56 @@ namespace OrclCM
 
         static IEnumerable<string[]> Rows(string path)
         {
-            string[] lines;
-            try { lines = File.Exists(path) ? File.ReadAllLines(path) : new string[0]; }
-            catch (Exception) { yield break; }
-            for (int i = 1; i < lines.Length; i++)  // skip the header
+            var lines = new List<string>();
+            try
+            {
+                if (File.Exists(path))  // shared read: works while the file is open in Excel
+                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    using (var reader = new StreamReader(fs))
+                        for (string l; (l = reader.ReadLine()) != null;) lines.Add(l);
+            }
+            catch (Exception) { }
+            for (int i = 1; i < lines.Count; i++)  // skip the header
                 if (lines[i].Length > 0) yield return lines[i].Split(',');
         }
 
+        sealed class PendingLine { public string Path, Header, Line; }
+        static readonly List<PendingLine> pending = new List<PendingLine>();
+
+        /// <summary>Lines that couldn't be written yet (e.g. the file is open in Excel).</summary>
+        public static int PendingCount => pending.Count;
+
         static void Append(string path, string header, string line)
         {
-            try
+            pending.Add(new PendingLine { Path = path, Header = header, Line = line });
+            FlushPending();
+        }
+
+        /// <summary>Writes queued lines in order; stops at the first failure and retries later.</summary>
+        public static void FlushPending()
+        {
+            try { Flush(); }
+            finally { WriteCheckpoint(); }
+        }
+
+        static void Flush()
+        {
+            while (pending.Count > 0)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                if (!File.Exists(path)) File.WriteAllText(path, header + "\r\n");
-                File.AppendAllText(path, line + "\r\n");
+                var p = pending[0];
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(p.Path));
+                    using (var fs = new FileStream(p.Path, FileMode.Append, FileAccess.Write, FileShare.Read))
+                    using (var w = new StreamWriter(fs))
+                    {
+                        if (fs.Length == 0) w.Write(p.Header + "\r\n");
+                        w.Write(p.Line + "\r\n");
+                    }
+                }
+                catch (Exception) { return; }  // logging must never break the meter; try again later
+                pending.RemoveAt(0);
             }
-            catch (Exception) { }  // logging must never break the meter
         }
     }
 
@@ -343,6 +459,8 @@ namespace OrclCM
         public bool AlertSleep = true;
         public bool MiniMode;
         public int? MiniX, MiniY;
+        public bool AutoUpdateCheck = true;
+        public DateTime? LastUpdateCheckUtc;
 
         public static readonly int[] GraphRanges = { 240, 3600, 86400 };
 
@@ -394,6 +512,12 @@ namespace OrclCM
                     case "MiniMode": s.MiniMode = flag; break;
                     case "MiniX": if (isInt) s.MiniX = n; break;
                     case "MiniY": if (isInt) s.MiniY = n; break;
+                    case "AutoUpdateCheck": s.AutoUpdateCheck = flag; break;
+                    case "LastUpdateCheckUtc":
+                        if (DateTime.TryParseExact(value, "yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture,
+                                                   DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out DateTime d))
+                            s.LastUpdateCheckUtc = d;
+                        break;
                 }
             }
             return s;
@@ -420,6 +544,8 @@ namespace OrclCM
             Put("MiniMode", MiniMode ? 1 : 0);
             if (MiniX.HasValue) Put("MiniX", MiniX.Value);
             if (MiniY.HasValue) Put("MiniY", MiniY.Value);
+            Put("AutoUpdateCheck", AutoUpdateCheck ? 1 : 0);
+            if (LastUpdateCheckUtc.HasValue) Put("LastUpdateCheckUtc", LastUpdateCheckUtc.Value.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
             return sb.ToString();
         }
 
@@ -439,7 +565,7 @@ namespace OrclCM
         public const double DrainSeconds = 60, DrainWatts = 0.5;
         const double Hysteresis = 3;
         bool highFired, lowFired, drainFired;
-        double drainSince = -1;
+        double drainSince = -1, notDrainingSince = -1;
 
         public List<Alert> Check(Reading r, Settings s, double now)
         {
@@ -462,10 +588,18 @@ namespace OrclCM
                 }
             }
 
-            bool draining = r.Plugged == true && r.Watts.HasValue && r.Watts.Value < -DrainWatts;
-            if (!draining) { drainSince = -1; drainFired = false; }
+            if (r.Plugged == false) { drainSince = -1; notDrainingSince = -1; drainFired = false; return result; }
+            if (r.Plugged == null || !r.Watts.HasValue) return result;  // unknown: keep the current state
+            bool draining = r.Watts.Value < -DrainWatts;
+            if (!draining)
+            {
+                drainSince = -1;
+                if (notDrainingSince < 0) notDrainingSince = now;
+                if (now - notDrainingSince >= DrainSeconds) drainFired = false;  // re-arm after a minute of not draining
+            }
             else
             {
+                notDrainingSince = -1;
                 if (drainSince < 0) drainSince = now;
                 if (s.AlertDraining && !drainFired && now - drainSince >= DrainSeconds)
                 {

@@ -5,7 +5,7 @@ A tiny native Windows tray app that shows, live, how many **watts your laptop ba
 - **~120 KB portable exe**, nothing to install — runs on the .NET Framework 4.8 built into Windows 10 and 11
 - **English and Bulgarian** (Български) — follows Windows, or choose in the Language menu
 - **Tray-only:** no taskbar button. The tray icon shows the live wattage in small digits. Click it to show / hide the window, hover for details. Closing or minimizing the window hides it to the tray; quit with **Exit**
-- **Menu** on the window's title-bar icon (and on right-click of the tray icon or the window): the usual window commands plus *Always on top, Start with Windows, Mini widget, Theme (System / Dark / Light), Language, Graph range, Battery log…, Settings…, Export history…, Help, About, Exit*
+- **Menu** on the window's title-bar icon (and on right-click of the tray icon or the window): the usual window commands plus *Always on top, Start with Windows, Mini widget, Theme (System / Dark / Light), Language, Graph range, Battery log…, Settings…, Export history…, Check for updates…, Help, About, Exit*
 - **Start with Windows** — starts straight into the tray; follows the exe if you move it
 - **Time left:** "Full in 47 min" / "Empty in 3 h 12 min" from the last minute's average
 - **Battery health:** capacity now vs. when new, and charge cycle count (when the battery reports them)
@@ -15,6 +15,7 @@ A tiny native Windows tray app that shows, live, how many **watts your laptop ba
 - **Sleep report:** after waking, how much battery was used while asleep (spots laptops that keep waking up)
 - **History** up to 24 hours — graph range 4 min / 1 h / 24 h, point at the graph for exact values, export to CSV
 - **Battery log:** every plugged-in / on-battery / sleep period and a daily battery-health record, kept across restarts (`sessions.csv`, `health.csv` in `%APPDATA%\OrclCM`), with a health-over-time chart
+- **Updates:** *Check for updates…* (menu or the About dialog) and an automatic daily check (Settings). A newer release is downloaded from GitHub, verified against the SHA-256 published in its release notes, swapped in and restarted - if the new version fails to start, the current one is put back
 - **Mini widget:** a small always-on-top box with just the wattage — drag anywhere, double-click for the full window
 - **Dark and light themes**, following Windows by default
 - Window position, size and settings are remembered (`%APPDATA%\OrclCM\settings.ini`)
@@ -52,9 +53,12 @@ The version lives in `src\AppInfo.cs` (`Version`, format `1.X.XXX`, plus the mat
 | `src\MainForm.cs` | window, graph, menus and tray icon |
 | `src\SettingsForm.cs`, `src\InfoForms.cs`, `src\LogForm.cs` | Settings, About, Help and Battery log windows |
 | `src\MiniForm.cs` | mini widget |
+| `src\Updater.cs` | update check and verified self-update |
 | `src\Lang.cs` | English / Bulgarian texts (a test checks every UI string is translated) |
 | `src\TrayIconRenderer.cs` | draws the wattage digits on the tray icon |
 | `tests\CoreTests.cs` | regression tests (run by `build.bat`) |
+
+**Releasing:** tag `v<Version>`, attach `dist\OrclCM.exe` as `OrclCM.exe`, and include the line `SHA-256 (OrclCM.exe): <hash>` in the release notes - the in-app updater refuses to install a release without a matching checksum.
 
 Earlier versions (up to 1.2.000) were written in Python; they are in the git history.
 

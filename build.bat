@@ -22,10 +22,10 @@ if not exist build mkdir build
 if not exist dist mkdir dist
 
 echo [1/3] Building and running tests
-"%CSC%" %OPTS% /target:exe /out:build\CoreTests.exe src\AppInfo.cs src\Lang.cs src\Core.cs src\Features.cs src\TrayIconRenderer.cs tests\CoreTests.cs
-if errorlevel 1 goto :fail
+"%CSC%" %OPTS% /target:exe /out:build\CoreTests.exe src\AppInfo.cs src\Lang.cs src\Core.cs src\Features.cs src\Updater.cs src\TrayIconRenderer.cs tests\CoreTests.cs
+if not "%errorlevel%"=="0" goto :fail
 build\CoreTests.exe
-if errorlevel 1 goto :fail
+if not "%errorlevel%"=="0" goto :fail
 
 echo [2/3] Removing previous build output
 if exist "%OUT%" del /f /q "%OUT%"
@@ -36,7 +36,7 @@ if exist "%OUT%" (
 
 echo [3/3] Building %OUT%
 "%CSC%" %OPTS% /target:winexe /out:"%OUT%" /win32icon:assets\icon.ico /win32manifest:src\app.manifest src\*.cs
-if errorlevel 1 goto :fail
+if not "%errorlevel%"=="0" goto :fail
 if not exist "%OUT%" goto :fail
 
 echo.
