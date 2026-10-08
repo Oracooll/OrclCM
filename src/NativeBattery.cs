@@ -145,6 +145,8 @@ namespace OrclCM
                 {
                     Capabilities = info.Capabilities,
                     FullChargedCapacity = info.FullChargedCapacity,
+                    DesignedCapacity = info.DesignedCapacity,
+                    CycleCount = info.CycleCount,
                     PowerState = status.PowerState,
                     Capacity = status.Capacity,
                     Rate = status.Rate,

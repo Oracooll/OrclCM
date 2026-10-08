@@ -33,7 +33,7 @@ namespace OrclCM
                     g.Clear(Color.Transparent);
                     float r = size / 5f;
                     using (var path = RoundedRect(new RectangleF(0, 0, size - 1, size - 1), r))
-                    using (var bg = new SolidBrush(Present.Bg))
+                    using (var bg = new SolidBrush(Theme.Dark.Bg))  // dark badge reads well on light and dark taskbars
                         g.FillPath(bg, path);
 
                     string text = Text(watts);

@@ -22,8 +22,10 @@ namespace OrclCM.Tests
         static void Near(double? actual, double expected, string name) =>
             Check(actual.HasValue && Math.Abs(actual.Value - expected) < 1e-6, name, actual);
 
-        static BatteryRecord Rec(uint state = 0, int rate = 0, uint cap = 0, uint full = 50000, uint caps = 0x80000000) =>
-            new BatteryRecord { PowerState = state, Rate = rate, Capacity = cap, FullChargedCapacity = full, Capabilities = caps };
+        static BatteryRecord Rec(uint state = 0, int rate = 0, uint cap = 0, uint full = 50000, uint caps = 0x80000000,
+                                 uint design = 0, uint cycles = 0) =>
+            new BatteryRecord { PowerState = state, Rate = rate, Capacity = cap, FullChargedCapacity = full, Capabilities = caps,
+                                DesignedCapacity = design, CycleCount = cycles };
 
         static Reading Agg(bool? ac, params BatteryRecord[] r) => Battery.Aggregate(r, ac);
 
@@ -35,6 +37,14 @@ namespace OrclCM.Tests
             Polling();
             Version();
             TrayIcons();
+            EnergyAndHealth();
+            TimeLeft();
+            Sessions();
+            AlertRules();
+            HistoryAndCsv();
+            SettingsFile();
+            AutostartEntry();
+            Themes();
             Console.WriteLine(failures == 0 ? "All " + passed + " checks passed." : failures + " FAILED, " + passed + " passed.");
             return failures == 0 ? 0 : 1;
         }
@@ -86,8 +96,8 @@ namespace OrclCM.Tests
 
         static void Classification()
         {
-            Present.Classify(R(-8), out Color c, out string label);
-            Check(label == "Plugged in · discharging" && c == Present.Orange, "draining while plugged in is shown", label);
+            Present.Classify(R(-8), out Tone c, out string label);
+            Check(label == "Plugged in · discharging" && c == Tone.Discharging, "draining while plugged in is shown", label);
             Check(Label(R(12)) == "Charging", "charging");
             Check(Label(R(0.1)) == "Plugged in · not charging", "plugged idle");
             Check(Label(R(-5, false)) == "On battery", "on battery");
@@ -105,7 +115,7 @@ namespace OrclCM.Tests
             Check(v.Big == "+10.0 W" && v.Status == "Charging" && v.TrayWatts == 10, "fresh reading", v.Status);
 
             v = Present.Describe(new Snapshot(2, 102, null, "Battery removed"), good, 102.5);
-            Check(v.Status.StartsWith("Stale") && v.Detail.Contains("Battery removed") && v.BigColor == Present.Stale
+            Check(v.Status.StartsWith("Stale") && v.Detail.Contains("Battery removed") && v.BigTone == Tone.Stale
                   && v.TrayWatts == null, "failed read after success is stale", v.Status);
 
             v = Present.Describe(good, good, 100 + Present.StaleAfter + 1);
@@ -167,15 +177,174 @@ namespace OrclCM.Tests
             Check(TrayIconRenderer.Text(null) == "--" && TrayIconRenderer.Text(-4.53) == "4.5"
                   && TrayIconRenderer.Text(23.4) == "23" && TrayIconRenderer.Text(1234) == "99+", "tray digits");
             foreach (int size in new[] { 16, 20, 24, 32 })
-                using (var icon = TrayIconRenderer.Render(12.3, Present.Green, size))
+                using (var icon = TrayIconRenderer.Render(12.3, Theme.Dark.Charging, size))
                     Check(icon.Width == size, "tray icon size " + size, icon.Width);
 
             // a tray icon is redrawn whenever the value changes - it must not leak GDI/USER handles
-            for (int i = 0; i < 50; i++) TrayIconRenderer.Render(i, Present.Orange, 16).Dispose();
+            for (int i = 0; i < 50; i++) TrayIconRenderer.Render(i, Theme.Dark.Discharging, 16).Dispose();
             int gdi = GetGuiResources(GetCurrentProcess(), 0), user = GetGuiResources(GetCurrentProcess(), 1);
-            for (int i = 0; i < 2000; i++) TrayIconRenderer.Render(i % 100 - 50, Present.Orange, 16).Dispose();
+            for (int i = 0; i < 2000; i++) TrayIconRenderer.Render(i % 100 - 50, Theme.Dark.Discharging, 16).Dispose();
             int gdiAfter = GetGuiResources(GetCurrentProcess(), 0), userAfter = GetGuiResources(GetCurrentProcess(), 1);
             Check(gdiAfter - gdi < 10 && userAfter - user < 10, "no handle leak", gdi + "->" + gdiAfter + ", " + user + "->" + userAfter);
+        }
+
+        static void EnergyAndHealth()
+        {
+            var r = Agg(false, Rec(Battery.Discharging, -10000, 25000, 50000, design: 60000, cycles: 312));
+            Near(r.RemainingWh, 25, "remaining energy");
+            Near(r.FullWh, 50, "full energy");
+            Near(r.DesignWh, 60, "design energy");
+            Check(r.Cycles == 312, "cycle count");
+            Check(Estimates.Health(r) == "Health 83%  (50.0 of 60.0 Wh)  ·  312 cycles", "health text", Estimates.Health(r));
+
+            r = Agg(false, Rec(Battery.Discharging, -10000, 25000, 50000, design: 60000, cycles: 0));
+            Check(r.Cycles == null && Estimates.Health(r) == "Health 83%  (50.0 of 60.0 Wh)", "no cycles when not reported");
+            r = Agg(false, Rec(cap: 40, full: 80, caps: 0x80000000 | Battery.CapacityRelative, design: 100));
+            Check(r.RemainingWh == null && r.DesignWh == null && Estimates.Health(r) == null, "relative units: no energy or health");
+            r = Agg(false, Rec(cycles: 5), Rec(cycles: 9));
+            Check(r.Cycles == null, "cycles only for a single battery");
+        }
+
+        static Reading E(double? watts, double remainingWh, double fullWh, double percent) =>
+            new Reading { Watts = watts, RemainingWh = remainingWh, FullWh = fullWh, Percent = percent, Plugged = watts > 0 };
+
+        static void TimeLeft()
+        {
+            Check(Estimates.TimeLeft(E(30, 20, 50, 40), 30) == "Full in 1 h 00 min", "full estimate", Estimates.TimeLeft(E(30, 20, 50, 40), 30));
+            Check(Estimates.TimeLeft(E(-10, 25, 50, 50), -10) == "Empty in 2 h 30 min", "empty estimate");
+            Check(Estimates.TimeLeft(E(-10, 1, 50, 2), -120) == "Empty in <1 min", "very short estimate", Estimates.TimeLeft(E(-10, 1, 50, 2), -120));
+            Check(Estimates.TimeLeft(E(20, 49.9, 50, 99.8), 20) == null, "no estimate when full");
+            Check(Estimates.TimeLeft(E(0.1, 20, 50, 40), 0.1) == null, "no estimate when idle");
+            Check(Estimates.TimeLeft(E(10, 20, 50, 40), -5) == null, "no estimate right after direction change");
+            Check(Estimates.TimeLeft(E(-0.5, 49, 50, 98), -0.5) == null, "no estimate beyond 48 h");
+            Check(Estimates.Duration(30) == "<1 min" && Estimates.Duration(47 * 60) == "47 min" && Estimates.Duration(3 * 3600 + 12 * 60) == "3 h 12 min",
+                  "duration formatting");
+        }
+
+        static void Sessions()
+        {
+            var s = new Session();
+            s.Add(0, 30, true);
+            s.Add(2, 30, true);
+            s.Add(4, 60, true);
+            Near(s.EnergyWh, (30 * 2 + 60 * 2) / 3600.0, "session energy integrated");
+            Near(s.Peak, 60, "session peak");
+            Near(s.Average, 40, "session average");
+            s.Add(100, 30, true);  // after a long gap (sleep): not integrated
+            Near(s.EnergyWh, (30 * 2 + 60 * 2) / 3600.0, "gaps are not integrated");
+            s.Add(102, -10, false);  // unplugged: new session
+            Check(s.Plugged == false && s.Samples == 1 && s.EnergyWh == 0 && s.Start == 102, "unplugging starts a new session");
+            s.Add(104, -10, false);
+            Check(s.Text(164).StartsWith("On battery for 1 min · ") && s.Text(164).Contains(" -0.01 Wh") && s.Text(164).Contains("peak -10.0 W"),
+                  "session text", s.Text(164));
+            s.Add(106, null, null);  // failed read: plug state unknown, keeps the session
+            Check(s.Plugged == false && s.Samples == 2, "failed read keeps the session");
+            Check(new Session().Text(0) == null, "no session text before data");
+        }
+
+        static void AlertRules()
+        {
+            var set = new Settings { AlertHighEnabled = true, AlertHigh = 80, AlertLowEnabled = true, AlertLow = 20, AlertDraining = true };
+            var a = new Alerts();
+            Reading P(double pct, bool plugged, double w) => new Reading { Percent = pct, Plugged = plugged, Watts = w };
+            Check(a.Check(P(79, true, 20), set, 0).Count == 0, "below high limit: quiet");
+            var fired = a.Check(P(80, true, 20), set, 2);
+            Check(fired.Count == 1 && fired[0].Text.Contains("80%"), "high limit alert");
+            Check(a.Check(P(81, true, 20), set, 4).Count == 0, "high alert fires once");
+            Check(a.Check(P(78, true, 20), set, 6).Count == 0 && a.Check(P(80, true, 20), set, 8).Count == 0, "hysteresis: no re-alert at 78%");
+            a.Check(P(76, true, 20), set, 10);
+            Check(a.Check(P(80, true, 20), set, 12).Count == 1, "re-alerts after dropping 3% below");
+
+            Check(a.Check(P(21, false, -10), set, 20).Count == 0, "above low limit: quiet");
+            Check(a.Check(P(20, false, -10), set, 22).Count == 1, "low alert");
+            Check(a.Check(P(19, false, -10), set, 24).Count == 0, "low alert fires once");
+            Check(a.Check(P(19, true, 20), set, 26).Count == 0 && a.Check(P(19, false, -10), set, 28).Count == 1, "re-alerts after plugging in and out");
+
+            var d = new Alerts();
+            Check(d.Check(P(50, true, -5), set, 100).Count == 0, "drain: not before a minute");
+            Check(d.Check(P(50, true, -5), set, 100 + Alerts.DrainSeconds - 1).Count == 0, "drain: still under a minute");
+            var drain = d.Check(P(50, true, -5), set, 100 + Alerts.DrainSeconds);
+            Check(drain.Count == 1 && drain[0].Title == "Plugged in but draining", "drain alert after a minute");
+            Check(d.Check(P(50, true, -5), set, 300).Count == 0, "drain alert fires once");
+            d.Check(P(50, true, 10), set, 302);
+            d.Check(P(50, true, -5), set, 304);
+            Check(d.Check(P(50, true, -5), set, 304 + Alerts.DrainSeconds).Count == 1, "drain re-arms after charging resumes");
+
+            var off = new Settings { AlertHighEnabled = false, AlertLowEnabled = false, AlertDraining = false };
+            var q = new Alerts();
+            Check(q.Check(P(95, true, 1), off, 0).Count == 0 && q.Check(P(5, false, -1), off, 1).Count == 0
+                  && q.Check(P(50, true, -9), off, 2).Count == 0 && q.Check(P(50, true, -9), off, 200).Count == 0, "disabled alerts stay quiet");
+        }
+
+        static void HistoryAndCsv()
+        {
+            var h = new History();
+            var t0 = new DateTime(2026, 10, 8, 9, 30, 0);
+            h.Add(new Sample { At = t0, Time = 0, Watts = -4.5, Percent = 79.25, Plugged = true, State = "Plugged in · discharging" });
+            h.Add(new Sample { At = t0.AddSeconds(2), Time = 2, Watts = null, State = "read failed" });
+            h.Add(new Sample { At = t0.AddSeconds(4), Time = 4, Watts = -5.5, Percent = 79.2, Plugged = true, State = "a, \"b\"" });
+            Near(h.AverageWatts(4, 60), -5, "average ignores failed reads");
+            Check(h.AverageWatts(1000, 60) == null, "no average without recent data");
+            string csv = History.ToCsv(h.All);
+            var lines = csv.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+            Check(lines[0] == "time,watts,battery_percent,plugged_in,state", "csv header");
+            Check(lines[1] == "2026-10-08 09:30:00,-4.500,79.3,yes,Plugged in · discharging", "csv row", lines[1]);
+            Check(lines[2] == "2026-10-08 09:30:02,,,,read failed", "csv failed row", lines[2]);
+            Check(lines[3].EndsWith(",\"a, \"\"b\"\"\""), "csv quoting", lines[3]);
+
+            var big = new History();
+            for (int i = 0; i <= 50000; i++) big.Add(new Sample { Time = i * 2.0, Watts = 1 });
+            Check(big.Count <= History.MaxAge / 2 + 1 && big.All[0].Time >= 50000 * 2.0 - History.MaxAge, "history keeps 24 h", big.Count);
+        }
+
+        static void SettingsFile()
+        {
+            var s = new Settings { WindowX = -1200, WindowY = 40, WindowWidth = 410, WindowHeight = 450, TopMost = true, AlertHighEnabled = true,
+                                   AlertHigh = 85, AlertLowEnabled = false, AlertLow = 15, AlertDraining = false, GraphRange = 3600, Theme = ThemeMode.Light };
+            var r = Settings.Parse(s.Serialize());
+            Check(r.WindowX == -1200 && r.WindowY == 40 && r.WindowWidth == 410 && r.WindowHeight == 450 && r.TopMost && r.AlertHighEnabled
+                  && r.AlertHigh == 85 && !r.AlertLowEnabled && r.AlertLow == 15 && !r.AlertDraining && r.GraphRange == 3600 && r.Theme == ThemeMode.Light,
+                  "settings round trip");
+            var bad = Settings.Parse("AlertHigh=500\nAlertLow=abc\nGraphRange=7\nTheme=Purple\nWindowWidth=10\njunk\n=1");
+            Check(bad.AlertHigh == 100 && bad.AlertLow == 20 && bad.GraphRange == 240 && bad.Theme == ThemeMode.System && bad.WindowWidth == 300,
+                  "bad settings values are clamped or ignored");
+            Check(Settings.Parse("Theme=2").Theme == ThemeMode.System, "numeric theme ignored");
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "OrclCM-tests-" + Guid.NewGuid().ToString("N"));
+            string path = System.IO.Path.Combine(dir, "settings.ini");
+            Check(Settings.Load(path).GraphRange == 240, "missing settings file gives defaults");
+            s.Save(path);
+            Check(Settings.Load(path).AlertHigh == 85, "settings saved and loaded");
+            System.IO.Directory.Delete(dir, true);
+        }
+
+        static void AutostartEntry()
+        {
+            const string testKey = @"Software\OrclCM.Tests\Run";
+            var a = new Autostart(testKey);
+            try
+            {
+                a.Set(false, @"C:\x\OrclCM.exe");
+                Check(!a.Enabled, "autostart off");
+                a.Set(true, @"C:\Apps\OrclCM.exe");
+                Check(a.Enabled && a.Current == "\"C:\\Apps\\OrclCM.exe\" /tray", "autostart on, starts in tray", a.Current);
+                a.RefreshPath(@"D:\Moved\OrclCM.exe");
+                Check(a.Current == "\"D:\\Moved\\OrclCM.exe\" /tray", "entry follows a moved exe", a.Current);
+                a.Set(false, @"D:\Moved\OrclCM.exe");
+                a.RefreshPath(@"E:\Other\OrclCM.exe");
+                Check(!a.Enabled, "refresh never re-enables");
+            }
+            finally
+            {
+                Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(@"Software\OrclCM.Tests", false);
+            }
+        }
+
+        static void Themes()
+        {
+            Check(Theme.Resolve(ThemeMode.Dark) == Theme.Dark && Theme.Resolve(ThemeMode.Light) == Theme.Light, "explicit themes");
+            var sys = Theme.Resolve(ThemeMode.System);
+            Check(sys == (Theme.SystemUsesLight() ? Theme.Light : Theme.Dark), "system theme follows Windows");
+            Check(Theme.Light.Of(Tone.Charging) != Theme.Dark.Of(Tone.Charging) && Theme.Light.Of(Tone.Fg) == Theme.Light.Fg, "tones map per theme");
         }
 
         static bool Throws(Action a)

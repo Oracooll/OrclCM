@@ -2,10 +2,19 @@
 
 A tiny native Windows tray app that shows, live, how many **watts your laptop battery is charging (or draining) at**, with a rolling history graph.
 
-- **~40 KB portable exe**, nothing to install — runs on the .NET Framework 4.8 built into Windows 10 and 11
-- **Tray-only:** no taskbar button. The tray icon shows the live wattage in small digits. Click it to show / hide the window, hover for details, right-click for *Show / hide window / Always on top / Exit*. Closing or minimizing the window hides it to the tray; quit with **Exit**
+- **~80 KB portable exe**, nothing to install — runs on the .NET Framework 4.8 built into Windows 10 and 11
+- **Tray-only:** no taskbar button. The tray icon shows the live wattage in small digits. Click it to show / hide the window, hover for details. Closing or minimizing the window hides it to the tray; quit with **Exit**
+- **Menu** on the window's title-bar icon (and on right-click of the tray icon or the window): the usual window commands plus *Always on top, Start with Windows, Theme (System / Dark / Light), Graph range, Settings…, Export history…, Help, About, Exit*
+- **Start with Windows** — starts straight into the tray; follows the exe if you move it
+- **Time left:** "Full in 47 min" / "Empty in 3 h 12 min" from the last minute's average
+- **Battery health:** capacity now vs. when new, and charge cycle count (when the battery reports them)
+- **Session stats** since plugging in / unplugging: energy in or out (Wh), average and peak rate
+- **Alerts** (Settings): charged to a limit (e.g. 80%), low battery, and "plugged in but draining" for a minute
+- **History** up to 24 hours — graph range 4 min / 1 h / 24 h, export to CSV
+- **Dark and light themes**, following Windows by default
+- Window position, size and settings are remembered (`%APPDATA%\OrclCM\settings.ini`)
 - Starting OrclCM again while it's running just brings up its window
-- Refreshes every 2 seconds, keeps ~4 minutes of history
+- Refreshes every 2 seconds
 - Green = charging, orange = discharging (on battery, *or plugged in but still draining*), grey = plugged in but not charging
 - Values Windows doesn't report are shown as `--` / "rate unavailable", never as a fake 0 W
 - If a reading fails or stops updating, the display is marked **Stale** with the time of the last good reading and the error, and the tray icon switches to `--`
@@ -32,9 +41,11 @@ The version lives in `src\AppInfo.cs` (`Version`, format `1.X.XXX`, plus the mat
 
 | Path | What |
 |------|------|
-| `src\Core.cs` | measurement model, battery aggregation, display logic, polling |
+| `src\Core.cs` | measurement model, battery aggregation, display logic, themes, polling |
+| `src\Features.cs` | history, session stats, estimates, health, alerts, settings, autostart |
 | `src\NativeBattery.cs` | Windows battery driver access |
-| `src\MainForm.cs` | window, graph and tray icon |
+| `src\MainForm.cs` | window, graph, menus and tray icon |
+| `src\SettingsForm.cs`, `src\InfoForms.cs` | Settings, About and Help dialogs |
 | `src\TrayIconRenderer.cs` | draws the wattage digits on the tray icon |
 | `tests\CoreTests.cs` | regression tests (run by `build.bat`) |
 

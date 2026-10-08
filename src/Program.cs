@@ -10,7 +10,7 @@ namespace OrclCM
         const string ShowEventName = @"Local\OrclCM.ShowWindow";
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             using (var mutex = new Mutex(true, MutexName, out bool first))
             using (var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName))
@@ -23,7 +23,10 @@ namespace OrclCM
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                var form = new MainForm(new Poller(NativeBattery.Read, TimeSpan.FromSeconds(2)));
+                bool startHidden = Array.Exists(args, a => string.Equals(a, Autostart.TrayArgument, StringComparison.OrdinalIgnoreCase));
+                string settingsPath = Settings.DefaultPath;
+                var form = new MainForm(new Poller(NativeBattery.Read, TimeSpan.FromSeconds(2)),
+                                        Settings.Load(settingsPath), settingsPath, startHidden);
 
                 var listener = new Thread(() =>
                 {
