@@ -1,3 +1,0 @@
-# Optional: system-tray icon support
-pystray>=0.19
-pillow>=10.0

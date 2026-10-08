@@ -1,10 +1,8 @@
-__pycache__/
-*.py[cod]
-.venv/
-venv/
 build/
 dist/
-*.spec
-.DS_Store
+*.pdb
 Thumbs.db
+# leftovers from the old Python version
 .build-venv/
+__pycache__/
+*.spec
