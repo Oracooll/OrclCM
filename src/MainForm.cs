@@ -31,7 +31,6 @@ namespace OrclCM
         readonly Alerts alerts = new Alerts();
         readonly NotifyIcon tray;
         readonly ContextMenuStrip trayMenu;
-        readonly CheckBox topBox;
         readonly Timer uiTimer;
         readonly bool startHidden;
         readonly Font bigFont = new Font("Segoe UI", 34, FontStyle.Bold);
@@ -65,9 +64,6 @@ namespace OrclCM
             SetStyle(ControlStyles.ResizeRedraw, true);
             try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); Icon = appIcon; } catch { }
 
-            topBox = new CheckBox { Text = "Always on top", AutoSize = true, FlatStyle = FlatStyle.Flat, Checked = settings.TopMost };
-            topBox.CheckedChanged += (s, e) => SetTopMost(topBox.Checked);
-            Controls.Add(topBox);
             TopMost = settings.TopMost;
 
             trayMenu = BuildTrayMenu();
@@ -160,13 +156,6 @@ namespace OrclCM
             }
         }
 
-        protected override void OnLayout(LayoutEventArgs e)
-        {
-            base.OnLayout(e);
-            if (topBox != null)
-                topBox.Location = new Point((ClientSize.Width - topBox.Width) / 2, ClientSize.Height - topBox.Height - Px(8));
-        }
-
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (!exiting && e.CloseReason != CloseReason.WindowsShutDown && e.CloseReason != CloseReason.TaskManagerClosing)
@@ -207,7 +196,7 @@ namespace OrclCM
         {
             switch (cmd)
             {
-                case CmdTopMost: topBox.Checked = !TopMost; break;
+                case CmdTopMost: SetTopMost(!TopMost); break;
                 case CmdAutostart: SetAutostart(!SafeAutostartEnabled()); break;
                 case CmdThemeSystem: SetTheme(ThemeMode.System); break;
                 case CmdThemeDark: SetTheme(ThemeMode.Dark); break;
@@ -410,12 +399,6 @@ namespace OrclCM
             Theme.Current = Theme.Resolve(settings.Theme);
             var t = Theme.Current;
             BackColor = t.Bg;
-            topBox.BackColor = t.Bg;
-            topBox.ForeColor = t.Dim;
-            topBox.FlatAppearance.BorderColor = t.Dim;
-            topBox.FlatAppearance.CheckedBackColor = t.Bg;
-            topBox.FlatAppearance.MouseOverBackColor = t.GraphBg;
-            topBox.FlatAppearance.MouseDownBackColor = t.GraphBg;
             ApplyTitleBarTheme();
             Invalidate(true);
         }
@@ -492,7 +475,7 @@ namespace OrclCM
             y = DrawCentered(g, view.Detail, detailFont, t.Dim, y + Px(2), inner);
             y = DrawCentered(g, sessionText, smallFont, t.Dim, y + Px(6), inner);
             y = DrawCentered(g, healthText, smallFont, t.Dim, y + Px(2), inner);
-            var graph = new Rectangle(pad, y + Px(8), inner, topBox.Top - Px(8) - (y + Px(8)));
+            var graph = new Rectangle(pad, y + Px(8), inner, ClientSize.Height - pad - (y + Px(8)));
             if (graph.Height > Px(30))
                 DrawGraph(g, graph);
             else
