@@ -1,0 +1,5 @@
+# Exact versions used by build_exe.bat (installed into the isolated .build-venv).
+# Bump deliberately and rebuild; never install these into your global Python.
+pyinstaller==6.22.3
+pystray==0.19.5
+pillow==12.3.0
