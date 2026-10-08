@@ -43,7 +43,7 @@ except Exception:  # app still works without tray support
     pystray = None
 
 APP_NAME = "OrclCM"
-VERSION = "1.2.000"  # major.minor.build - the build script names the exe after it
+VERSION = "1.2.000"  # major.minor.build - shown in the window title bar
 
 POLL_SECONDS = 2
 HISTORY = 120  # samples kept in the graph

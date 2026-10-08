@@ -321,7 +321,7 @@ class BuildScript(unittest.TestCase):
         shutil.copy(os.path.join(PROJECT, "build_exe.bat"), self.proj)
         for name in ("requirements-build.txt", "build_version.py", "orclcm.py"):
             shutil.copy(os.path.join(PROJECT, name), self.proj)
-        self.out = os.path.join(self.proj, "dist", f"OrclCM-{cm.VERSION}.exe")
+        self.out = os.path.join(self.proj, "dist", "OrclCM.exe")
 
     def build(self, venv=None, **env):
         e = dict(os.environ, NOPAUSE="1", BUILD_VENV=venv or self.venv, **env)

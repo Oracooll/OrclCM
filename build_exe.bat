@@ -1,6 +1,7 @@
 @echo off
 setlocal
-REM Builds a portable single-file OrclCM-<version>.exe into .\dist (version from orclcm.py).
+REM Builds a portable single-file OrclCM.exe into .\dist. The version (VERSION in
+REM orclcm.py) appears in the window title bar and the exe's file properties.
 REM Uses an isolated build environment (.build-venv) with the pinned versions from
 REM requirements-build.txt, so your global Python packages are never touched.
 REM Stops at the first failing step; "Done" is only printed if a new exe was produced.
@@ -27,7 +28,7 @@ echo [3/5] Reading version
 set "VERSION="
 for /f "delims=" %%v in ('""%VPY%" build_version.py"') do set "VERSION=%%v"
 if not defined VERSION goto :fail
-set "NAME=OrclCM-%VERSION%"
+set "NAME=OrclCM"
 set "OUT=dist\%NAME%.exe"
 echo Version %VERSION%
 

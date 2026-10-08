@@ -14,7 +14,7 @@ A tiny cross-platform desktop app that shows, live, how many **watts your laptop
 
 ## Download (Windows, portable)
 
-Grab **`OrclCM-<version>.exe`** from the [Releases](../../releases) page and run it — no install, no Python needed. Put it anywhere (USB stick, OneDrive, Desktop).
+Grab **`OrclCM.exe`** from the [Releases](../../releases) page and run it — no install, no Python needed. Put it anywhere (USB stick, OneDrive, Desktop).
 
 > Windows SmartScreen may warn about an unsigned app the first time: click **More info → Run anyway**.
 
@@ -35,7 +35,7 @@ python orclcm.py
 
 ## Build the exe yourself
 
-On Windows with Python installed, double-click `build_exe.bat`. It creates an isolated build environment (`.build-venv`) with the exact versions in `requirements-build.txt` — your global Python packages are not touched — and stops with **Build FAILED** at the first step that fails. The portable exe lands in `dist\OrclCM-<version>.exe`, named after `VERSION` in `orclcm.py` (format `1.X.XXX` — bump it there before a release); any previous exe there is deleted first, so a failed build never leaves an old exe looking new.
+On Windows with Python installed, double-click `build_exe.bat`. It creates an isolated build environment (`.build-venv`) with the exact versions in `requirements-build.txt` — your global Python packages are not touched — and stops with **Build FAILED** at the first step that fails. The portable exe lands in `dist\OrclCM.exe`. The version — `VERSION` in `orclcm.py`, format `1.X.XXX`, bump it there before a release — is shown in the window title bar (e.g. *OrclCM 1.2.000*) and in the exe's file properties; any previous exe there is deleted first, so a failed build never leaves an old exe looking new.
 
 ## Tests
 

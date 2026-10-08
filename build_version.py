@@ -26,7 +26,7 @@ def main():
         "StringStruct('FileDescription','OrclCM - live laptop charging wattage'),"
         f"StringStruct('FileVersion','{version}'),"
         "StringStruct('InternalName','OrclCM'),"
-        f"StringStruct('OriginalFilename','OrclCM-{version}.exe'),"
+        "StringStruct('OriginalFilename','OrclCM.exe'),"
         "StringStruct('ProductName','OrclCM'),"
         f"StringStruct('ProductVersion','{version}')])]),"
         "VarFileInfo([VarStruct('Translation',[1033,1200])])])\n"
